@@ -271,6 +271,12 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+#hud-slide-counter,
+.inspector-group-title .tabular-nums {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
 button:focus-visible,
 [tabindex]:focus-visible,
 input:focus-visible,
@@ -1398,6 +1404,7 @@ input[type='range']::-webkit-slider-thumb:hover {
   flex-direction: column;
   flex-shrink: 0;
   z-index: 20;
+  container-type: inline-size;
 }
 
 .studio-timeline-dock.hidden {
@@ -1405,28 +1412,64 @@ input[type='range']::-webkit-slider-thumb:hover {
 }
 
 .dock-header {
-  height: 32px;
+  height: 36px;
   padding: 0 var(--space-3);
   border-bottom: 1px solid var(--separator-subtle);
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
-}
-
-.dock-header-lead,
-.dock-header-trailing {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
   min-width: 0;
 }
 
+.dock-header-lead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.dock-header-trailing {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  flex: 0 0 auto;
+}
+
 .dock-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   font-size: var(--text-2xs);
   font-weight: 600;
   color: var(--label-secondary);
+}
+
+.dock-title svg {
+  flex-shrink: 0;
+}
+
+.dock-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.dock-cues-btn {
+  height: 24px;
+  padding: 0 var(--space-2);
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+}
+
+#btn-toggle-timeline-dock {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  padding: 0;
 }
 
 .dock-stat-pill {
@@ -1438,6 +1481,19 @@ input[type='range']::-webkit-slider-thumb:hover {
   padding: 1px 7px;
   border-radius: var(--radius-pill);
   white-space: nowrap;
+  flex-shrink: 0;
+}
+
+@container (max-width: 620px) {
+  .dock-stat-pill + .dock-stat-pill {
+    display: none;
+  }
+}
+
+@container (max-width: 470px) {
+  .dock-stat-pill {
+    display: none;
+  }
 }
 
 .studio-timeline-dock.is-collapsed .dock-body {
@@ -1487,8 +1543,19 @@ input[type='range']::-webkit-slider-thumb:hover {
   width: 34px;
   height: 20px;
   border-radius: 3px;
-  object-fit: cover;
+  overflow: hidden;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: var(--surface-stage-well);
+}
+
+.dock-seq-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
 .dock-seq-label {

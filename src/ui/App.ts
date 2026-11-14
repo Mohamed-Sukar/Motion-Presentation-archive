@@ -2066,7 +2066,7 @@ export class MotionPresentationApp {
           <div class="prop-row">
             <span class="prop-label">${t('inspector.imageFileLabel')}</span>
             <div class="prop-subtext" style="word-break: break-all;">
-              ${this.escapeHtml(activeSlide.imageAsset.name)} (${(activeSlide.imageAsset.fileSize / 1024).toFixed(0)} KB)
+              <bdi dir="ltr">${this.escapeHtml(activeSlide.imageAsset.name)}</bdi> (${(activeSlide.imageAsset.fileSize / 1024).toFixed(0)} KB)
             </div>
             <button class="btn" id="btn-replace-slide-img" style="margin-top: 4px; width: 100%;">
               ${t('inspector.replaceImage')}
