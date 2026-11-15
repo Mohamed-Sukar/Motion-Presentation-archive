@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -246,6 +247,29 @@ export async function runWindowLayoutTests(): Promise<{ passed: number; failed: 
     close();
     scope.dispose();
     env.teardown();
+  });
+
+  await test('WL-9', 'Workspace modal and popover backdrops stay fixed-centered popup overlays instead of static bottom flow', () => {
+    const cssPath = path.resolve(__dirname, '../src/ui/styles/studio-theme.css');
+    const css = fs.readFileSync(cssPath, 'utf-8');
+    const modalMatch = /\.modal-backdrop\s*\{([^}]*)\}/.exec(css);
+    assert.ok(modalMatch, '.modal-backdrop rule must exist in studio-theme.css');
+    assert.ok(/position:\s*fixed/.test(modalMatch[1]), '.modal-backdrop must be position: fixed');
+    assert.ok(/align-items:\s*center/.test(modalMatch[1]), '.modal-backdrop must center vertically');
+    assert.ok(/justify-content:\s*center/.test(modalMatch[1]), '.modal-backdrop must center horizontally');
+
+    const popMatch = /\.apple-popover-backdrop\s*\{([^}]*)\}/.exec(css);
+    assert.ok(popMatch, '.apple-popover-backdrop rule must exist');
+    assert.ok(/position:\s*fixed/.test(popMatch[1]), '.apple-popover-backdrop must be position: fixed');
+
+    const skinMatch = /\.skin-popover-backdrop\s*\{([^}]*)\}/.exec(css);
+    assert.ok(skinMatch, '.skin-popover-backdrop rule must exist');
+    assert.ok(/align-items:\s*center/.test(skinMatch[1]), '.skin-popover-backdrop must center vertically');
+    assert.ok(/justify-content:\s*center/.test(skinMatch[1]), '.skin-popover-backdrop must center horizontally');
+
+    assert.ok(/\.modal-card\s*\{/.test(css), '.modal-card styling must exist');
+    assert.ok(/\.modal-header\s*\{/.test(css), '.modal-header styling must exist');
+    assert.ok(/\.modal-footer\s*\{/.test(css), '.modal-footer styling must exist');
   });
 
   return { passed, failed };
