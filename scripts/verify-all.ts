@@ -1646,6 +1646,11 @@ console.log('\n[Test 38] UI Components & Lifecycle Suite (Phase 3)');
 const { runUiComponentsTests } = await import('../test/ui-components.test');
 const uiCompRes = await runSuiteStrict('UI Components & Lifecycle (Phase 3)', runUiComponentsTests);
 
+// 10. Phase 4: Store Slices & Typed Commands Suite
+console.log('\n[Test 39] Store Slices & Typed Commands Suite (Phase 4)');
+const { runStoreCommandsTests } = await import('../test/store-commands.test');
+const storeCmdRes = await runSuiteStrict('Store Slices & Typed Commands (Phase 4)', runStoreCommandsTests);
+
 console.log('[Test 33] MotionReelImporter native /motion-reel metadata & cue mapping');
 {
   const filmJson = JSON.stringify({
@@ -1854,6 +1859,7 @@ console.log(`[Phase 1] Path Registry: ${regRes.passed}/${regRes.passed + regRes.
 console.log(`[Phase 1] Streaming ZIP & Protocol: ${streamRes.passed}/${streamRes.passed + streamRes.failed} Passed`);
 console.log(`[Phase 2] Memory & Resource Budget: ${memRes.passed}/${memRes.passed + memRes.failed} Passed`);
 console.log(`[Phase 3] UI Components & Lifecycle: ${uiCompRes.passed}/${uiCompRes.passed + uiCompRes.failed} Passed`);
+console.log(`[Phase 4] Store Slices & Typed Commands: ${storeCmdRes.passed}/${storeCmdRes.passed + storeCmdRes.failed} Passed`);
 console.log('------------------------------------------------------');
 console.log(`GRAND TOTAL: ${grandTotalPassed}/${grandTotalTests} Passed (${Math.round((grandTotalPassed / grandTotalTests) * 100)}%)`);
 console.log('======================================================\n');
