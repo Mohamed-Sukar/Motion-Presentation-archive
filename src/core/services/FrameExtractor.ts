@@ -199,23 +199,6 @@ export class FrameExtractor {
   }
 
   /**
-   * Captures a fast JPEG preview data URL at `timeSec` without creating a PNG File/Blob.
-   */
-  static async extractFrameThumbnail(
-    videoAsset: MediaAsset,
-    timeSec: number,
-    maxDimension = 320,
-    signal?: AbortSignal
-  ): Promise<string> {
-    const session = await this.createSession(videoAsset, signal);
-    try {
-      return await session.seekAndCaptureThumb(timeSec, maxDimension, signal);
-    } finally {
-      session.dispose();
-    }
-  }
-
-  /**
    * Generates a filmstrip of `count` JPEG thumbnail data URLs across the video timeline
    * using one reusable decoder session.
    */

@@ -1,5 +1,6 @@
 import { isRtlLanguage } from '../../core/i18n';
 import { ComponentScope, escapeHtml } from '../core/ComponentLifecycle';
+import type { LayerStack } from '../core/LayerStack';
 import { Icons } from '../icons';
 
 export interface AppleMenuItem {
@@ -24,6 +25,12 @@ export interface AppleMenuOpenOptions {
   align?: 'start' | 'end';
   role?: 'menu' | 'listbox';
   ariaLabel?: string;
+  host?: HTMLElement | null;
+  scope?: ComponentScope;
+  menuId?: string;
+  menuClass?: string;
+  layerStack?: LayerStack;
+  layerId?: string;
   onClose?: () => void;
 }
 
@@ -56,11 +63,25 @@ export function openAppleMenu(options: AppleMenuOpenOptions): () => void {
     align = 'start',
     role = 'menu',
     ariaLabel,
+    host,
+    scope,
+    menuId,
+    menuClass,
+    layerStack,
+    layerId = menuId || 'apple-active-menu',
     onClose,
   } = options;
 
+  const mountTarget = host ?? document.body;
+  if (!mountTarget) {
+    return () => {};
+  }
+
   const menuEl = document.createElement('div');
-  menuEl.className = 'apple-glass-menu';
+  menuEl.className = menuClass ? `apple-glass-menu ${menuClass}` : 'apple-glass-menu';
+  if (menuId) {
+    menuEl.id = menuId;
+  }
   menuEl.setAttribute('role', role);
   if (ariaLabel) {
     menuEl.setAttribute('aria-label', ariaLabel);
@@ -87,8 +108,9 @@ export function openAppleMenu(options: AppleMenuOpenOptions): () => void {
           : '';
       const classes = [
         'apple-menu-item',
+        menuId === 'studio-context-menu' ? 'ctx-menu-item' : '',
         item.checked ? 'is-checked' : '',
-        item.danger ? 'is-danger' : '',
+        item.danger ? 'is-danger danger' : '',
       ]
         .filter(Boolean)
         .join(' ');
@@ -109,6 +131,7 @@ export function openAppleMenu(options: AppleMenuOpenOptions): () => void {
         <button
           type="button"
           class="${classes}"
+          ${item.id ? `id="${escapeHtml(item.id)}"` : ''}
           data-apple-menu-idx="${idx}"
           role="${itemRole}"
           ${checkedAttr}
@@ -126,18 +149,24 @@ export function openAppleMenu(options: AppleMenuOpenOptions): () => void {
     })
     .join('');
 
-  document.body.appendChild(menuEl);
+  mountTarget.appendChild(menuEl);
 
   if (anchorEl) {
     anchorEl.setAttribute('aria-expanded', 'true');
   }
 
   // Position cleanly within viewport bounds
-  const vw = window.innerWidth || 1280;
-  const vh = window.innerHeight || 800;
-  const menuRect = menuEl.getBoundingClientRect();
-  const menuW = Math.max(minWidth, menuRect.width);
-  const menuH = menuRect.height;
+  const vw =
+    typeof window !== 'undefined' && Number.isFinite(window.innerWidth) && window.innerWidth > 0
+      ? window.innerWidth
+      : 1280;
+  const vh =
+    typeof window !== 'undefined' && Number.isFinite(window.innerHeight) && window.innerHeight > 0
+      ? window.innerHeight
+      : 800;
+  const menuRect = menuEl.getBoundingClientRect?.();
+  const menuW = Math.max(minWidth, menuRect?.width || minWidth);
+  const menuH = Math.max(180, menuRect?.height || 260);
   const rtl = isRtlLanguage();
 
   let left = 12;
@@ -167,16 +196,21 @@ export function openAppleMenu(options: AppleMenuOpenOptions): () => void {
 
   menuEl.style.left = `${Math.round(left)}px`;
   menuEl.style.top = `${Math.round(top)}px`;
+  menuEl.style.maxHeight = `${Math.max(160, vh - 16)}px`;
   menuEl.style.visibility = 'visible';
 
+  const prevFocused =
+    typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
   let closed = false;
   const cleanupListeners: Array<() => void> = [];
 
-  const close = () => {
+  const close = (restoreFocus = false) => {
     if (closed) return;
     closed = true;
+    layerStack?.remove(layerId);
     cleanupListeners.forEach((fn) => fn());
     cleanupListeners.length = 0;
+    scope?.clear();
     if (anchorEl) {
       anchorEl.setAttribute('aria-expanded', 'false');
     }
@@ -185,9 +219,28 @@ export function openAppleMenu(options: AppleMenuOpenOptions): () => void {
       currentActiveMenu = null;
     }
     onClose?.();
+    if (restoreFocus && anchorEl && typeof anchorEl.focus === 'function') {
+      anchorEl.focus();
+    } else if (
+      restoreFocus &&
+      prevFocused &&
+      (prevFocused as { isConnected?: boolean }).isConnected !== false
+    ) {
+      prevFocused.focus?.();
+    }
   };
 
-  currentActiveMenu = { el: menuEl, trigger: anchorEl, close };
+  if (layerStack) {
+    const topmostPriority = layerStack.getTopmost()?.priority ?? 0;
+    layerStack.push({
+      id: layerId,
+      kind: 'context-menu',
+      priority: Math.max(40, topmostPriority + 1),
+      close: () => close(true),
+    });
+  }
+
+  currentActiveMenu = { el: menuEl, trigger: anchorEl, close: () => close(false) };
 
   menuEl.querySelectorAll<HTMLButtonElement>('.apple-menu-item').forEach((btn) => {
     btn.addEventListener('click', (e) => {
@@ -195,28 +248,29 @@ export function openAppleMenu(options: AppleMenuOpenOptions): () => void {
       const idx = Number(btn.dataset.appleMenuIdx);
       const item = items[idx];
       if (!item || item.disabled) return;
-      close();
+      close(false);
       item.onSelect();
     });
   });
 
-  const handleDocMouseDown = (e: MouseEvent) => {
-    const target = e.target;
+  const handleDocMouseDown = (e: Event) => {
+    const target = e.target as HTMLElement | null;
     if (
-      target instanceof Node &&
-      (menuEl.contains(target) || (anchorEl && anchorEl.contains(target)))
+      target &&
+      (menuEl.contains?.(target) ||
+        target.closest?.(`#${menuEl.id || '__none__'}`) ||
+        (anchorEl && anchorEl.contains?.(target)))
     ) {
       return;
     }
-    close();
+    close(false);
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      close();
-      anchorEl?.focus?.();
+      close(true);
       return;
     }
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End') {
@@ -241,33 +295,46 @@ export function openAppleMenu(options: AppleMenuOpenOptions): () => void {
   const handleResizeOrScroll = (e: Event) => {
     const target = e.target;
     if (target instanceof Node && menuEl.contains(target)) return;
-    close();
+    close(false);
   };
 
-  // Defer outside click registration to avoid catching the opening click event
-  const rafId = window.requestAnimationFrame(() => {
+  const bindGlobal = () => {
     if (closed) return;
-    document.addEventListener('mousedown', handleDocMouseDown, true);
-    window.addEventListener('keydown', handleKeyDown, true);
-    window.addEventListener('resize', handleResizeOrScroll);
-    window.addEventListener('scroll', handleResizeOrScroll, true);
-  });
+    if (scope) {
+      scope.listen(document, 'mousedown', handleDocMouseDown, true);
+      scope.listen(window, 'keydown', (ev) => handleKeyDown(ev as KeyboardEvent), true);
+      scope.listen(window, 'resize', handleResizeOrScroll);
+      scope.listen(window, 'scroll', handleResizeOrScroll, true);
+    } else {
+      document.addEventListener('mousedown', handleDocMouseDown, true);
+      window.addEventListener('keydown', handleKeyDown, true);
+      window.addEventListener('resize', handleResizeOrScroll);
+      window.addEventListener('scroll', handleResizeOrScroll, true);
+      cleanupListeners.push(() => {
+        document.removeEventListener('mousedown', handleDocMouseDown, true);
+        window.removeEventListener('keydown', handleKeyDown, true);
+        window.removeEventListener('resize', handleResizeOrScroll);
+        window.removeEventListener('scroll', handleResizeOrScroll, true);
+      });
+    }
+  };
 
-  cleanupListeners.push(() => {
-    window.cancelAnimationFrame(rafId);
-    document.removeEventListener('mousedown', handleDocMouseDown, true);
-    window.removeEventListener('keydown', handleKeyDown, true);
-    window.removeEventListener('resize', handleResizeOrScroll);
-    window.removeEventListener('scroll', handleResizeOrScroll, true);
-  });
+  // Context menus (point-anchored) can bind immediately so unit tests & keyboard work right away;
+  // button-anchored menus defer one frame so the opening click doesn't self-dismiss.
+  if (point || typeof window.requestAnimationFrame !== 'function') {
+    bindGlobal();
+  } else {
+    const rafId = window.requestAnimationFrame(bindGlobal);
+    cleanupListeners.push(() => window.cancelAnimationFrame(rafId));
+  }
 
   // Focus active item or first enabled item for keyboard accessibility
   const initialFocus =
     menuEl.querySelector<HTMLButtonElement>('.apple-menu-item.is-checked:not(:disabled)') ||
     menuEl.querySelector<HTMLButtonElement>('.apple-menu-item:not(:disabled)');
-  initialFocus?.focus({ preventScroll: true });
+  initialFocus?.focus?.({ preventScroll: true });
 
-  return close;
+  return () => close(false);
 }
 
 function getSelectOptions(selectEl: HTMLSelectElement): HTMLOptionElement[] {
@@ -295,7 +362,8 @@ export function syncAppleSelectDisplay(selectEl: HTMLSelectElement): void {
 
 export function enhanceAppleSelects(
   container: HTMLElement | null,
-  scope: ComponentScope
+  scope: ComponentScope,
+  layerStack?: LayerStack
 ): void {
   if (
     !container ||
@@ -361,6 +429,8 @@ export function enhanceAppleSelects(
       const closeFn = openAppleMenu({
         anchorEl: btn,
         role: 'listbox',
+        layerStack,
+        layerId: 'apple-select-menu',
         minWidth: Math.max(isCompact ? 132 : 176, Math.round(rect.width)),
         ariaLabel: ariaLabel || undefined,
         items: options.map((opt) => ({

@@ -39,7 +39,7 @@ if (typeof (globalThis as any).Image === 'undefined') {
 
 import { PresentationStore } from '../src/core/state/PresentationStore';
 import { createDefaultSettings, createEmptyProject } from '../src/core/domain/defaults';
-import { MediaAsset, PlaybackPhase, SlideNode } from '../src/core/domain/types';
+import { MediaAsset, SlideNode } from '../src/core/domain/types';
 import { StagePlaybackEngine } from '../src/core/engine/StagePlaybackEngine';
 
 function createMockMediaAsset(id: string, name: string): MediaAsset {
@@ -333,13 +333,13 @@ async function runEmpiricalStressTests(): Promise<void> {
   // ===========================================================================
   console.log('[Test 4] Engine Destruction in BLACKOUT / WHITEOUT & Post-Destroy Resilience');
   {
-    const { canvas, ctx } = createMockCanvas();
+    const { canvas } = createMockCanvas();
     const settings = createDefaultSettings();
 
     // 4.1 Destroy in BLACKOUT phase
     {
       const engine = new StagePlaybackEngine(canvas, settings);
-      let statusCallbackCalled = false;
+      let statusCallbackCalled: boolean;
       engine.onStatusChange(() => {
         statusCallbackCalled = true;
       });
@@ -447,29 +447,11 @@ async function runEmpiricalStressTests(): Promise<void> {
     }
     const settings = store.getSettings();
 
-    // Mock DOM root for App fullscreen simulation
-    const root = {
-      innerHTML: '',
-      querySelector: (sel: string) => {
-        if (sel === '#fullscreen-root') {
-          return {
-            innerHTML: '',
-            querySelector: () => null,
-          };
-        }
-        return null;
-      },
-    };
-
     // Simulate 50 rapid enter/exit cycles
     for (let cycle = 0; cycle < 50; cycle++) {
-      let isPresentingFullscreen = false;
-      let presenterEngine: StagePlaybackEngine | null = null;
-
       // 1. Enter fullscreen
       const { canvas } = createMockCanvas();
-      isPresentingFullscreen = true;
-      presenterEngine = new StagePlaybackEngine(canvas, settings);
+      const presenterEngine = new StagePlaybackEngine(canvas, settings);
       await presenterEngine.loadProject(slides, settings, cycle % slides.length);
 
       // Random action during fullscreen: blank or advance
@@ -483,9 +465,7 @@ async function runEmpiricalStressTests(): Promise<void> {
 
       // 2. Exit fullscreen
       const lastIdx = presenterEngine.getStatus().currentSlideIndex ?? 0;
-      isPresentingFullscreen = false;
       presenterEngine.destroy();
-      presenterEngine = null;
 
       // Synchronize store
       store.setActivePreviewIndex(lastIdx);

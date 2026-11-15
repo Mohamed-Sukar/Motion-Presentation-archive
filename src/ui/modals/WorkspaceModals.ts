@@ -19,6 +19,8 @@ import {
   wireSurgicalAiPromptView,
 } from '../components/SurgicalAiPromptView';
 import { ComponentScope, escapeHtml } from '../core/ComponentLifecycle';
+import type { LayerStack } from '../core/LayerStack';
+import { attachModalDialogBehavior } from '../core/ModalDialog';
 import { Icons } from '../icons';
 
 export type SequenceLayoutPreference = 'auto' | 'bottom' | 'side' | 'hidden';
@@ -29,14 +31,15 @@ export interface StageSettingsPopoverProps {
   settings: PresentationSettings;
   sequenceLayoutPref: SequenceLayoutPreference;
   anchorEl?: HTMLElement | null;
+  layerStack?: LayerStack;
   onUpdateSettings: (partial: Partial<PresentationSettings>) => void;
   onChangeSequenceLayout: (pref: SequenceLayoutPreference) => void;
   onClose: () => void;
 }
 
-export function openStageSettingsPopover(props: StageSettingsPopoverProps): void {
+export function openStageSettingsPopover(props: StageSettingsPopoverProps): () => void {
   const { host, scope, settings } = props;
-  if (!host) return;
+  if (!host) return () => {};
   scope.clear();
 
   const ratios: Array<{ id: AspectRatioOption; label: string; w: number; h: number }> = [
@@ -88,7 +91,7 @@ export function openStageSettingsPopover(props: StageSettingsPopoverProps): void
 
         <div class="stage-pop-section">
           <span class="prop-label">${escapeHtml(t('settings.fitModeLabel'))}</span>
-          <div class="skin-mode-segmented" role="group" aria-label="${escapeHtml(t('settings.fitModeLabel'))}">
+          <div class="skin-mode-segmented is-two-col" role="group" aria-label="${escapeHtml(t('settings.fitModeLabel'))}">
             <button type="button" class="skin-mode-btn ${settings.fitMode === 'contain' ? 'active' : ''}" data-pick-fit="contain">
               <span>${escapeHtml(t('settings.fitContain'))}</span>
             </button>
@@ -120,7 +123,10 @@ export function openStageSettingsPopover(props: StageSettingsPopoverProps): void
         <div class="stage-pop-section">
           <div class="prop-label">
             <span>${escapeHtml(t('settings.stageBgLabel'))}</span>
-            <span class="tabular-nums" style="color:var(--label-tertiary);">${escapeHtml(settings.stageBackground || '#05070B')}</span>
+            <div class="stage-color-composite">
+              <input type="color" id="pop-stage-bg" class="stage-color-picker" value="${escapeHtml(settings.stageBackground || '#05070B')}" aria-label="${escapeHtml(t('settings.stageBgLabel'))}" />
+              <input type="text" id="pop-stage-bg-text" class="stage-hex-input tabular-nums" dir="ltr" value="${escapeHtml(settings.stageBackground || '#05070B')}" aria-label="Hex" />
+            </div>
           </div>
           <div class="stage-color-swatches" role="group" aria-label="${escapeHtml(t('settings.stageSwatchesLabel'))}">
             ${STAGE_COLOR_SWATCHES.map((sw) => {
@@ -129,10 +135,6 @@ export function openStageSettingsPopover(props: StageSettingsPopoverProps): void
               const isLightSwatch = sw.id === 'paper' || sw.id === 'daylight';
               return `<button type="button" class="stage-swatch-btn ${active ? 'active' : ''}" data-stage-hex="${sw.hex}" data-light-swatch="${isLightSwatch ? 'true' : 'false'}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}" aria-pressed="${active ? 'true' : 'false'}" style="background:${sw.hex};"></button>`;
             }).join('')}
-          </div>
-          <div style="display:flex;gap:8px;align-items:center;margin-top:6px;">
-            <input type="color" id="pop-stage-bg" value="${escapeHtml(settings.stageBackground || '#05070B')}" style="width:34px;height:26px;padding:0;border:none;background:transparent;cursor:pointer;" />
-            <input type="text" id="pop-stage-bg-text" class="input-field tabular-nums" value="${escapeHtml(settings.stageBackground || '#05070B')}" style="flex:1;" />
           </div>
         </div>
       </div>
@@ -166,22 +168,23 @@ export function openStageSettingsPopover(props: StageSettingsPopoverProps): void
     }
   }
 
-  const close = () => {
-    scope.clear();
-    host.innerHTML = '';
-    props.onClose();
-  };
+  const backdrop = host.querySelector('#stage-settings-backdrop') as HTMLElement;
+  const dialog = host.querySelector('#stage-settings-card') as HTMLElement | null;
+  const closeBtn = host.querySelector('#btn-close-stage-popover') as HTMLElement | null;
 
-  scope.listen(host.querySelector('#btn-close-stage-popover'), 'click', close);
-  scope.listen(host.querySelector('#stage-settings-backdrop'), 'click', (e) => {
-    if ((e.target as HTMLElement)?.id === 'stage-settings-backdrop') close();
+  const close = attachModalDialogBehavior({
+    host,
+    scope,
+    backdropEl: backdrop,
+    dialogEl: dialog,
+    layerStack: props.layerStack,
+    layerId: 'stage-settings-popover',
+    layerKind: 'popover',
+    initialFocusEl: closeBtn,
+    onAfterClose: props.onClose,
   });
-  scope.listen(window, 'keydown', (e) => {
-    if ((e as KeyboardEvent).key === 'Escape') {
-      e.stopPropagation();
-      close();
-    }
-  });
+
+  if (closeBtn) scope.listen(closeBtn, 'click', close);
 
   host.querySelectorAll('[data-pick-ratio]').forEach((btn) => {
     scope.listen(btn, 'click', () => {
@@ -249,12 +252,15 @@ export function openStageSettingsPopover(props: StageSettingsPopoverProps): void
       props.onUpdateSettings({ stageBackground: hex });
     });
   });
+
+  return close;
 }
 
 export interface EnginePreferencesModalProps {
   host: HTMLElement | null;
   scope: ComponentScope;
   settings: PresentationSettings;
+  layerStack?: LayerStack;
   onUpdateSettings: (partial: Partial<PresentationSettings>) => void;
   onClose: () => void;
 }
@@ -265,8 +271,8 @@ export function openEnginePreferencesModal(props: EnginePreferencesModalProps): 
   scope.clear();
 
   host.innerHTML = `
-    <div class="modal-backdrop" id="workspace-modal-backdrop" role="dialog" aria-modal="true" aria-label="${escapeHtml(t('modal.enginePrefsTitle'))}">
-      <div class="modal-card apple-sheet-modal">
+    <div class="modal-backdrop" id="workspace-modal-backdrop">
+      <div class="modal-card apple-sheet-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(t('modal.enginePrefsTitle'))}">
         <div class="modal-header">
           <span class="modal-title">${Icons.sliders} <span>${escapeHtml(t('modal.enginePrefsTitle'))}</span></span>
           <button type="button" class="btn btn-icon-only" id="btn-close-workspace-modal" aria-label="${escapeHtml(t('modal.close'))}">
@@ -361,25 +367,27 @@ export function openEnginePreferencesModal(props: EnginePreferencesModalProps): 
     </div>
   `;
 
-  enhanceAppleSelects(host, scope);
+  enhanceAppleSelects(host, scope, props.layerStack);
 
-  const close = () => {
-    scope.clear();
-    host.innerHTML = '';
-    props.onClose();
-  };
+  const backdrop = host.querySelector('#workspace-modal-backdrop') as HTMLElement;
+  const dialog = host.querySelector('.modal-card') as HTMLElement | null;
+  const closeBtn = host.querySelector('#btn-close-workspace-modal') as HTMLElement | null;
+  const doneBtn = host.querySelector('#btn-done-workspace-modal') as HTMLElement | null;
 
-  scope.listen(host.querySelector('#btn-close-workspace-modal'), 'click', close);
-  scope.listen(host.querySelector('#btn-done-workspace-modal'), 'click', close);
-  scope.listen(host.querySelector('#workspace-modal-backdrop'), 'click', (e) => {
-    if ((e.target as HTMLElement)?.id === 'workspace-modal-backdrop') close();
+  const close = attachModalDialogBehavior({
+    host,
+    scope,
+    backdropEl: backdrop,
+    dialogEl: dialog,
+    layerStack: props.layerStack,
+    layerId: 'workspace-modal',
+    layerKind: 'modal',
+    initialFocusEl: host.querySelector('#mod-interrupt-behavior') as HTMLElement | null ?? closeBtn,
+    onAfterClose: props.onClose,
   });
-  scope.listen(window, 'keydown', (e) => {
-    if ((e as KeyboardEvent).key === 'Escape') {
-      e.stopPropagation();
-      close();
-    }
-  });
+
+  if (closeBtn) scope.listen(closeBtn, 'click', close);
+  if (doneBtn) scope.listen(doneBtn, 'click', close);
 
   const interruptSel = host.querySelector('#mod-interrupt-behavior') as HTMLSelectElement | null;
   const backwardSel = host.querySelector('#mod-backward-behavior') as HTMLSelectElement | null;
@@ -426,28 +434,16 @@ export function openEnginePreferencesModal(props: EnginePreferencesModalProps): 
   });
 }
 
-export interface DeckDiagnosticsModalProps {
-  host: HTMLElement | null;
-  scope: ComponentScope;
-  diagnostics: {
-    slideCount: number;
-    videoTransitionCount: number;
-    proceduralTransitionCount: number;
-    notesCount: number;
-    estimatedDurationSec: number;
-    totalMediaBytes: number;
-  };
-  missingVideosCount: number;
-  firstMissingFileName?: string;
-  onRelinkMissing: () => void;
-  onClose: () => void;
+export interface DeckDiagnosticsSummary {
+  slideCount: number;
+  videoTransitionCount: number;
+  proceduralTransitionCount: number;
+  notesCount: number;
+  estimatedDurationSec: number;
+  totalMediaBytes: number;
 }
 
-export function openDeckDiagnosticsModal(props: DeckDiagnosticsModalProps): void {
-  const { host, scope, diagnostics } = props;
-  if (!host) return;
-  scope.clear();
-
+export function renderDiagnosticsGridMarkup(diagnostics: DeckDiagnosticsSummary): string {
   const mins = Math.floor(diagnostics.estimatedDurationSec / 60);
   const secs = diagnostics.estimatedDurationSec % 60;
   const durText = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
@@ -456,173 +452,34 @@ export function openDeckDiagnosticsModal(props: DeckDiagnosticsModalProps): void
       ? `${(diagnostics.totalMediaBytes / (1024 * 1024)).toFixed(1)} MB`
       : `${Math.round(diagnostics.totalMediaBytes / 1024)} KB`;
 
-  host.innerHTML = `
-    <div class="modal-backdrop" id="workspace-modal-backdrop" role="dialog" aria-modal="true" aria-label="${escapeHtml(t('modal.deckStatsTitle'))}">
-      <div class="modal-card apple-sheet-modal is-compact">
-        <div class="modal-header">
-          <span class="modal-title">${Icons.info} <span>${escapeHtml(t('modal.deckStatsTitle'))}</span></span>
-          <button type="button" class="btn btn-icon-only" id="btn-close-workspace-modal" aria-label="${escapeHtml(t('modal.close'))}">
-            ${Icons.close}
-          </button>
-        </div>
-
-        <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;">
-          ${
-            props.missingVideosCount > 0
-              ? `
-            <div class="inspector-alert-box">
-              <span style="display:inline-flex;align-items:center;gap:6px;font-weight:600;color:var(--signal-danger-text);">
-                ${Icons.alertCircle}
-                <span>${escapeHtml(t('nav.unlinkedText'))}</span>
-              </span>
-              ${props.firstMissingFileName ? `<span class="prop-subtext" dir="ltr">${escapeHtml(props.firstMissingFileName)}</span>` : ''}
-              <button type="button" class="btn btn-prominent" id="btn-modal-relink-video">
-                ${Icons.relink}
-                <span>${escapeHtml(t('nav.relinkBtn'))}</span>
-              </button>
-            </div>
-          `
-              : ''
-          }
-
-          <div class="diagnostics-grid">
-            <div class="stat-card">
-              <span class="stat-value tabular-nums">${diagnostics.slideCount}</span>
-              <span class="stat-label">${escapeHtml(t('settings.statTotalSlides'))}</span>
-            </div>
-            <div class="stat-card">
-              <span class="stat-value tabular-nums">${diagnostics.videoTransitionCount}</span>
-              <span class="stat-label">${escapeHtml(t('settings.statVideoTrans'))}</span>
-            </div>
-            <div class="stat-card">
-              <span class="stat-value tabular-nums">${diagnostics.proceduralTransitionCount}</span>
-              <span class="stat-label">${escapeHtml(t('settings.statCssTrans'))}</span>
-            </div>
-            <div class="stat-card">
-              <span class="stat-value tabular-nums">${diagnostics.notesCount}</span>
-              <span class="stat-label">${escapeHtml(t('settings.statWithNotes'))}</span>
-            </div>
-            <div class="stat-card">
-              <span class="stat-value tabular-nums">${durText}</span>
-              <span class="stat-label">${escapeHtml(t('settings.statEstDuration'))}</span>
-            </div>
-            <div class="stat-card">
-              <span class="stat-value tabular-nums">${mbText}</span>
-              <span class="stat-label">${escapeHtml(t('settings.statMediaSize'))}</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="modal-footer">
-          <button type="button" class="btn btn-prominent" id="btn-done-workspace-modal">${escapeHtml(t('modal.done'))}</button>
-        </div>
+  return `
+    <div class="diagnostics-grid">
+      <div class="stat-card">
+        <span class="stat-value tabular-nums">${diagnostics.slideCount}</span>
+        <span class="stat-label">${escapeHtml(t('settings.statTotalSlides'))}</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value tabular-nums">${diagnostics.videoTransitionCount}</span>
+        <span class="stat-label">${escapeHtml(t('settings.statVideoTrans'))}</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value tabular-nums">${diagnostics.proceduralTransitionCount}</span>
+        <span class="stat-label">${escapeHtml(t('settings.statCssTrans'))}</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value tabular-nums">${diagnostics.notesCount}</span>
+        <span class="stat-label">${escapeHtml(t('settings.statWithNotes'))}</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value tabular-nums">${durText}</span>
+        <span class="stat-label">${escapeHtml(t('settings.statEstDuration'))}</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value tabular-nums">${mbText}</span>
+        <span class="stat-label">${escapeHtml(t('settings.statMediaSize'))}</span>
       </div>
     </div>
   `;
-
-  const close = () => {
-    scope.clear();
-    host.innerHTML = '';
-    props.onClose();
-  };
-
-  scope.listen(host.querySelector('#btn-close-workspace-modal'), 'click', close);
-  scope.listen(host.querySelector('#btn-done-workspace-modal'), 'click', close);
-  scope.listen(host.querySelector('#workspace-modal-backdrop'), 'click', (e) => {
-    if ((e.target as HTMLElement)?.id === 'workspace-modal-backdrop') close();
-  });
-  scope.listen(host.querySelector('#btn-modal-relink-video'), 'click', () => {
-    close();
-    props.onRelinkMissing();
-  });
-  scope.listen(window, 'keydown', (e) => {
-    if ((e as KeyboardEvent).key === 'Escape') {
-      e.stopPropagation();
-      close();
-    }
-  });
-}
-
-export interface IdleLoopModalProps {
-  host: HTMLElement | null;
-  scope: ComponentScope;
-  slide: SlideNode;
-  onAssignLoop: () => void;
-  onRemoveLoop: () => void;
-  onClose: () => void;
-}
-
-export function openIdleLoopModal(props: IdleLoopModalProps): void {
-  const { host, scope, slide } = props;
-  if (!host) return;
-  scope.clear();
-
-  host.innerHTML = `
-    <div class="modal-backdrop" id="workspace-modal-backdrop" role="dialog" aria-modal="true" aria-label="${escapeHtml(t('modal.idleLoopTitle'))}">
-      <div class="modal-card apple-sheet-modal is-compact">
-        <div class="modal-header">
-          <span class="modal-title">${Icons.infinityLoop} <span>${escapeHtml(t('modal.idleLoopTitle'))}</span></span>
-          <button type="button" class="btn btn-icon-only" id="btn-close-workspace-modal" aria-label="${escapeHtml(t('modal.close'))}">
-            ${Icons.close}
-          </button>
-        </div>
-
-        <div class="modal-body" style="display:flex;flex-direction:column;gap:12px;">
-          <div class="apple-sheet-card">
-            <span class="prop-label">${escapeHtml(slide.title)}</span>
-            <div class="prop-subtext" style="word-break:break-all;">
-              ${
-                slide.idleLoopAsset
-                  ? `<bdi dir="ltr">${escapeHtml(slide.idleLoopAsset.name)}</bdi> (${slide.idleLoopAsset.durationSec.toFixed(1)}s)`
-                  : escapeHtml(t('inspector.idleLoopNone'))
-              }
-            </div>
-            <div style="display:flex;gap:8px;margin-top:8px;">
-              <button type="button" class="btn btn-prominent" id="btn-modal-assign-idle" style="flex:1;">
-                ${Icons.infinityLoop}
-                <span>${escapeHtml(slide.idleLoopAsset ? t('inspector.idleLoopReplace') : t('inspector.idleLoopAssign'))}</span>
-              </button>
-              ${
-                slide.idleLoopAsset
-                  ? `<button type="button" class="btn btn-destructive" id="btn-modal-remove-idle">${Icons.trash}<span>${escapeHtml(t('inspector.idleLoopRemove'))}</span></button>`
-                  : ''
-              }
-            </div>
-          </div>
-        </div>
-
-        <div class="modal-footer">
-          <button type="button" class="btn" id="btn-done-workspace-modal">${escapeHtml(t('modal.done'))}</button>
-        </div>
-      </div>
-    </div>
-  `;
-
-  const close = () => {
-    scope.clear();
-    host.innerHTML = '';
-    props.onClose();
-  };
-
-  scope.listen(host.querySelector('#btn-close-workspace-modal'), 'click', close);
-  scope.listen(host.querySelector('#btn-done-workspace-modal'), 'click', close);
-  scope.listen(host.querySelector('#workspace-modal-backdrop'), 'click', (e) => {
-    if ((e.target as HTMLElement)?.id === 'workspace-modal-backdrop') close();
-  });
-  scope.listen(host.querySelector('#btn-modal-assign-idle'), 'click', () => {
-    close();
-    props.onAssignLoop();
-  });
-  scope.listen(host.querySelector('#btn-modal-remove-idle'), 'click', () => {
-    close();
-    props.onRemoveLoop();
-  });
-  scope.listen(window, 'keydown', (e) => {
-    if ((e as KeyboardEvent).key === 'Escape') {
-      e.stopPropagation();
-      close();
-    }
-  });
 }
 
 export interface TransitionTrimModalProps {
@@ -631,6 +488,7 @@ export interface TransitionTrimModalProps {
   slide: SlideNode;
   nextSlide: SlideNode | null;
   currentStageVideoTimeSec?: number;
+  layerStack?: LayerStack;
   onCommitRange: (nextStart: number, nextEnd: number) => boolean;
   onSplitAtTime: (chosenSec: number) => Promise<boolean>;
   onExtractEndFrame: () => Promise<void>;
@@ -671,8 +529,8 @@ export function openTransitionTrimModal(props: TransitionTrimModalProps): void {
   scope.addCleanup(disposeSession);
 
   host.innerHTML = `
-    <div class="modal-backdrop" id="workspace-modal-backdrop" role="dialog" aria-modal="true" aria-label="${escapeHtml(t('modal.trimSplitTitle'))}">
-      <div class="modal-card apple-sheet-modal is-compact">
+    <div class="modal-backdrop" id="workspace-modal-backdrop" role="presentation">
+      <div class="modal-card apple-sheet-modal ${canSplit ? 'is-wide' : 'is-compact'}" role="dialog" aria-modal="true" aria-label="${escapeHtml(t('modal.trimSplitTitle'))}">
         <div class="modal-header">
           <span class="modal-title">${Icons.splitCue} <span>${escapeHtml(t('modal.trimSplitTitle'))}</span></span>
           <button type="button" class="btn btn-icon-only" id="btn-close-workspace-modal" aria-label="${escapeHtml(t('modal.close'))}">
@@ -680,90 +538,96 @@ export function openTransitionTrimModal(props: TransitionTrimModalProps): void {
           </button>
         </div>
 
-        <div class="modal-body" style="display:flex;flex-direction:column;gap:12px;">
-          <div class="inspector-filmstrip-box" style="margin-bottom:0;">
-            <div class="inspector-frame-pair">
-              <div class="inspector-frame-cell">
-                <img src="${startFrameUrl}" alt="${escapeHtml(t('inspector.startFrameAlt'))}" />
-                <span>${hasSlice ? t('inspector.startFrameSlice', { time: segStart.toFixed(2) }) : t('inspector.startFrameVideo')}</span>
+        <div class="modal-body ${canSplit ? 'trim-modal-grid' : ''}" style="${canSplit ? '' : 'display:flex;flex-direction:column;gap:12px;'}">
+          <div class="trim-modal-col">
+            <div class="inspector-filmstrip-box" style="margin-bottom:0;">
+              <div class="inspector-frame-pair">
+                <div class="inspector-frame-cell">
+                  <img src="${startFrameUrl}" alt="${escapeHtml(t('inspector.startFrameAlt'))}" />
+                  <span>${hasSlice ? t('inspector.startFrameSlice', { time: segStart.toFixed(2) }) : t('inspector.startFrameVideo')}</span>
+                </div>
+                <div style="text-align:center;color:var(--label-secondary);">${isRtlLanguage() ? Icons.arrowLeft : Icons.arrowRight}</div>
+                <div class="inspector-frame-cell">
+                  <img src="${endFrameUrl}" alt="${escapeHtml(t('inspector.endFrameAlt'))}" />
+                  <span>${hasSlice ? t('inspector.endFrameSlice', { time: segEnd.toFixed(2) }) : t('inspector.endFrameVideo')}</span>
+                </div>
               </div>
-              <div style="text-align:center;color:var(--label-secondary);">${isRtlLanguage() ? Icons.arrowLeft : Icons.arrowRight}</div>
-              <div class="inspector-frame-cell">
-                <img src="${endFrameUrl}" alt="${escapeHtml(t('inspector.endFrameAlt'))}" />
-                <span>${hasSlice ? t('inspector.endFrameSlice', { time: segEnd.toFixed(2) }) : t('inspector.endFrameVideo')}</span>
+              <div class="prop-subtext" style="word-break:break-all;">${escapeHtml(vid.name)} (${vid.width}×${vid.height})</div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+              <div class="prop-row" style="margin-bottom:0;">
+                <label class="prop-label" for="mod-trans-start">${escapeHtml(t('inspector.sliceStartLabel'))}</label>
+                <input type="number" min="0" max="${vid.durationSec.toFixed(2)}" step="0.05" class="input-field tabular-nums" id="mod-trans-start" value="${segStart.toFixed(2)}" />
+              </div>
+              <div class="prop-row" style="margin-bottom:0;">
+                <label class="prop-label" for="mod-trans-end">${escapeHtml(t('inspector.sliceEndLabel'))}</label>
+                <input type="number" min="0" max="${vid.durationSec.toFixed(2)}" step="0.05" class="input-field tabular-nums" id="mod-trans-end" value="${segEnd.toFixed(2)}" />
               </div>
             </div>
-            <div class="prop-subtext" style="word-break:break-all;">${escapeHtml(vid.name)} (${vid.width}×${vid.height})</div>
-          </div>
 
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-            <div class="prop-row" style="margin-bottom:0;">
-              <label class="prop-label" for="mod-trans-start">${escapeHtml(t('inspector.sliceStartLabel'))}</label>
-              <input type="number" min="0" max="${vid.durationSec.toFixed(2)}" step="0.05" class="input-field tabular-nums" id="mod-trans-start" value="${segStart.toFixed(2)}" />
-            </div>
-            <div class="prop-row" style="margin-bottom:0;">
-              <label class="prop-label" for="mod-trans-end">${escapeHtml(t('inspector.sliceEndLabel'))}</label>
-              <input type="number" min="0" max="${vid.durationSec.toFixed(2)}" step="0.05" class="input-field tabular-nums" id="mod-trans-end" value="${segEnd.toFixed(2)}" />
-            </div>
-          </div>
-
-          <div class="apple-sheet-card" id="mod-split-box" style="display:${canSplit ? 'flex' : 'none'};flex-direction:column;gap:8px;">
-            <div class="prop-label">
-              <span>${escapeHtml(t('inspector.splitPopoverHeading'))}</span>
-              <span class="tabular-nums" id="mod-split-readout" style="color:var(--signal-film);">${midTime.toFixed(2)}s</span>
-            </div>
-            <div class="split-preview-frame">
-              <img id="mod-split-preview-img" src="${startFrameUrl}" alt="${escapeHtml(t('inspector.splitPreviewAlt'))}" />
-            </div>
-            <div class="split-scrubber-row">
-              <span class="prop-subtext tabular-nums">${(segStart + 0.08).toFixed(2)}s</span>
-              <input type="range" id="mod-split-range" min="${(segStart + 0.08).toFixed(2)}" max="${Math.max(segStart + 0.09, segEnd - 0.08).toFixed(2)}" step="0.02" value="${midTime}" />
-              <span class="prop-subtext tabular-nums">${Math.max(segStart + 0.09, segEnd - 0.08).toFixed(2)}s</span>
-            </div>
-            <div style="display:flex;gap:6px;align-items:center;">
-              <input type="number" class="input-field tabular-nums" id="mod-split-num" min="${(segStart + 0.08).toFixed(2)}" max="${Math.max(segStart + 0.09, segEnd - 0.08).toFixed(2)}" step="0.02" value="${midTime.toFixed(2)}" style="width:92px;" />
-              <button type="button" class="btn btn-xs" id="btn-mod-split-stage-time" style="flex:1;">${escapeHtml(t('inspector.splitUseStageTime'))}</button>
-              <button type="button" class="btn btn-xs btn-prominent" id="btn-mod-confirm-split">${escapeHtml(t('inspector.splitConfirm'))}</button>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button type="button" class="btn" id="btn-mod-extract-end" style="flex:1;">
+                ${Icons.extractFrame}
+                <span>${escapeHtml(hasSlice ? t('inspector.extractEndSlice') : t('inspector.extractEndVideo'))}</span>
+              </button>
+              ${
+                props.onOpenReelCues
+                  ? `<button type="button" class="btn" id="btn-mod-open-reel-cues" style="flex:1;">${Icons.sliders}<span>${escapeHtml(t('inspector.editReelCues'))}</span></button>`
+                  : ''
+              }
             </div>
           </div>
 
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <button type="button" class="btn" id="btn-mod-extract-end" style="flex:1;">
-              ${Icons.extractFrame}
-              <span>${escapeHtml(hasSlice ? t('inspector.extractEndSlice') : t('inspector.extractEndVideo'))}</span>
-            </button>
-            ${
-              props.onOpenReelCues
-                ? `<button type="button" class="btn" id="btn-mod-open-reel-cues" style="flex:1;">${Icons.sliders}<span>${escapeHtml(t('inspector.editReelCues'))}</span></button>`
-                : ''
-            }
+          <div class="trim-modal-col" style="display:${canSplit ? 'flex' : 'none'};">
+            <div class="apple-sheet-card" id="mod-split-box" style="display:flex;flex-direction:column;gap:8px;">
+              <div class="prop-label">
+                <span>${escapeHtml(t('inspector.splitPopoverHeading'))}</span>
+                <span class="tabular-nums" id="mod-split-readout" style="color:var(--signal-film);">${midTime.toFixed(2)}s</span>
+              </div>
+              <div class="split-preview-frame">
+                <img id="mod-split-preview-img" src="${startFrameUrl}" alt="${escapeHtml(t('inspector.splitPreviewAlt'))}" />
+              </div>
+              <div class="split-scrubber-row">
+                <span class="prop-subtext tabular-nums">${(segStart + 0.08).toFixed(2)}s</span>
+                <input type="range" id="mod-split-range" min="${(segStart + 0.08).toFixed(2)}" max="${Math.max(segStart + 0.09, segEnd - 0.08).toFixed(2)}" step="0.02" value="${midTime}" />
+                <span class="prop-subtext tabular-nums">${Math.max(segStart + 0.09, segEnd - 0.08).toFixed(2)}s</span>
+              </div>
+              <div style="display:flex;gap:6px;align-items:center;">
+                <input type="number" class="input-field tabular-nums" id="mod-split-num" min="${(segStart + 0.08).toFixed(2)}" max="${Math.max(segStart + 0.09, segEnd - 0.08).toFixed(2)}" step="0.02" value="${midTime.toFixed(2)}" style="width:92px;" />
+                <button type="button" class="btn btn-xs" id="btn-mod-split-stage-time" style="flex:1;">${escapeHtml(t('inspector.splitUseStageTime'))}</button>
+                <button type="button" class="btn btn-xs" id="btn-mod-confirm-split">${escapeHtml(t('inspector.splitConfirm'))}</button>
+              </div>
+            </div>
           </div>
         </div>
 
         <div class="modal-footer">
-          <button type="button" class="btn" id="btn-done-workspace-modal">${escapeHtml(t('modal.done'))}</button>
+          <button type="button" class="btn btn-prominent" id="btn-done-workspace-modal">${escapeHtml(t('modal.done'))}</button>
         </div>
       </div>
     </div>
   `;
 
-  const close = () => {
-    scope.clear();
-    host.innerHTML = '';
-    props.onClose();
-  };
+  const backdrop = host.querySelector('#workspace-modal-backdrop') as HTMLElement;
+  const dialog = host.querySelector('.modal-card') as HTMLElement | null;
+  const closeBtn = host.querySelector('#btn-close-workspace-modal') as HTMLElement | null;
+  const doneBtn = host.querySelector('#btn-done-workspace-modal') as HTMLElement | null;
 
-  scope.listen(host.querySelector('#btn-close-workspace-modal'), 'click', close);
-  scope.listen(host.querySelector('#btn-done-workspace-modal'), 'click', close);
-  scope.listen(host.querySelector('#workspace-modal-backdrop'), 'click', (e) => {
-    if ((e.target as HTMLElement)?.id === 'workspace-modal-backdrop') close();
+  const close = attachModalDialogBehavior({
+    host,
+    scope,
+    backdropEl: backdrop,
+    dialogEl: dialog,
+    layerStack: props.layerStack,
+    layerId: 'workspace-modal',
+    layerKind: 'modal',
+    initialFocusEl: host.querySelector('#mod-trans-start') as HTMLElement | null ?? closeBtn,
+    onAfterClose: props.onClose,
   });
-  scope.listen(window, 'keydown', (e) => {
-    if ((e as KeyboardEvent).key === 'Escape') {
-      e.stopPropagation();
-      close();
-    }
-  });
+
+  if (closeBtn) scope.listen(closeBtn, 'click', close);
+  if (doneBtn) scope.listen(doneBtn, 'click', close);
 
   const startIn = host.querySelector('#mod-trans-start') as HTMLInputElement | null;
   const endIn = host.querySelector('#mod-trans-end') as HTMLInputElement | null;
@@ -904,6 +768,7 @@ export interface SurgicalAiModalProps {
   draftInstruction: string;
   aiMeta: import('../../core/domain/types').ProjectAiSourceMeta | undefined;
   currentVideoTimeSec: number | null;
+  layerStack?: LayerStack;
   callbacks: SurgicalAiPromptWireCallbacks;
   onClose: () => void;
 }
@@ -922,11 +787,13 @@ export function openSurgicalAiModal(props: SurgicalAiModalProps): void {
     draftInstruction: props.draftInstruction,
     aiMeta: props.aiMeta,
     currentVideoTimeSec: props.currentVideoTimeSec,
+    hideGroupHeader: true,
+    hideCopyAction: true,
   });
 
   host.innerHTML = `
-    <div class="modal-backdrop" id="workspace-modal-backdrop" role="dialog" aria-modal="true" aria-label="${escapeHtml(t('modal.aiEditTitle'))}">
-      <div class="modal-card apple-sheet-modal is-compact">
+    <div class="modal-backdrop" id="workspace-modal-backdrop" role="presentation">
+      <div class="modal-card apple-sheet-modal is-medium" role="dialog" aria-modal="true" aria-label="${escapeHtml(t('modal.aiEditTitle'))}">
         <div class="modal-header">
           <span class="modal-title">${Icons.wand} <span>${escapeHtml(t('modal.aiEditTitle'))}</span></span>
           <button type="button" class="btn btn-icon-only" id="btn-close-workspace-modal" aria-label="${escapeHtml(t('modal.close'))}">
@@ -936,30 +803,42 @@ export function openSurgicalAiModal(props: SurgicalAiModalProps): void {
         <div class="modal-body" id="surgical-ai-modal-body">
           ${innerHtml}
         </div>
+        <div class="modal-footer">
+          <button type="button" class="btn" id="btn-done-workspace-modal">${escapeHtml(t('modal.close'))}</button>
+          <button type="button" class="btn btn-prominent" id="btn-copy-ai-prompt">
+            ${Icons.duplicate}
+            <span>${escapeHtml(t('inspector.aiCopyBtn'))}</span>
+          </button>
+        </div>
       </div>
     </div>
   `;
 
+  const backdrop = host.querySelector('#workspace-modal-backdrop') as HTMLElement;
+  const dialogCard = host.querySelector('.modal-card') as HTMLElement | null;
   const body = host.querySelector('#surgical-ai-modal-body') as HTMLElement | null;
+  if (dialogCard) {
+    wireSurgicalAiPromptView(dialogCard, scope, props.activeSlide, props.slideIdx, props.totalSlides, props.callbacks);
+  }
   if (body) {
-    wireSurgicalAiPromptView(body, scope, props.activeSlide, props.slideIdx, props.totalSlides, props.callbacks);
-    enhanceAppleSelects(body, scope);
+    enhanceAppleSelects(body, scope, props.layerStack);
   }
 
-  const close = () => {
-    scope.clear();
-    host.innerHTML = '';
-    props.onClose();
-  };
+  const closeBtn = host.querySelector('#btn-close-workspace-modal') as HTMLElement | null;
+  const doneBtn = host.querySelector('#btn-done-workspace-modal') as HTMLElement | null;
 
-  scope.listen(host.querySelector('#btn-close-workspace-modal'), 'click', close);
-  scope.listen(host.querySelector('#workspace-modal-backdrop'), 'click', (e) => {
-    if ((e.target as HTMLElement)?.id === 'workspace-modal-backdrop') close();
+  const close = attachModalDialogBehavior({
+    host,
+    scope,
+    backdropEl: backdrop,
+    dialogEl: dialogCard,
+    layerStack: props.layerStack,
+    layerId: 'workspace-modal',
+    layerKind: 'modal',
+    initialFocusEl: host.querySelector('#insp-ai-custom-input') as HTMLElement | null ?? closeBtn,
+    onAfterClose: props.onClose,
   });
-  scope.listen(window, 'keydown', (e) => {
-    if ((e as KeyboardEvent).key === 'Escape') {
-      e.stopPropagation();
-      close();
-    }
-  });
+
+  if (closeBtn) scope.listen(closeBtn, 'click', close);
+  if (doneBtn) scope.listen(doneBtn, 'click', close);
 }

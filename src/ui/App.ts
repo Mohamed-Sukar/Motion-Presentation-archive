@@ -10,7 +10,6 @@ import {
   SlideNode,
 } from '../core/domain/types';
 import { StagePlaybackEngine } from '../core/engine/StagePlaybackEngine';
-import { DemoGenerator } from '../core/services/DemoGenerator';
 import {
   FilmstripFrame,
   FrameExtractor,
@@ -23,11 +22,20 @@ import {
   VIDEO_ACCEPT_STRING,
 } from '../core/services/MediaValidator';
 import { ProjectSerializer } from '../core/services/ProjectSerializer';
+import { decideQuitSave, shouldAutosave, DEFAULT_AUTOSAVE_DEBOUNCE_MS, DEFAULT_AUTOSAVE_MIN_INTERVAL_MS } from '../core/services/UnsavedChangesGuard';
+import {
+  createErrorThrottle,
+  ErrorReportThrottle,
+  GlobalErrorSource,
+  normalizeError,
+} from '../core/services/ErrorReporting';
 import {
   OpenedProjectDescriptor,
   RegisteredMediaDescriptor,
+  StreamingSaveAssetEntry,
   StreamingSavePayload,
   StreamingSaveResult,
+  buildStreamingSavePayload,
   projectFiles,
 } from '../core/services/ProjectFileService';
 import {
@@ -62,6 +70,7 @@ import { LayerStack } from './core/LayerStack';
 import {
   computeLayoutPlan,
   computeStageFrameSize,
+  DOCKED_INSPECTOR_MIN_WIDTH,
   FocusPaneTab,
   LayoutPlan,
 } from './layout/LayoutGovernor';
@@ -75,6 +84,7 @@ import {
   closeActiveAppleMenu,
   enhanceAppleSelects,
   openAppleMenu,
+  syncAppleSelectDisplay,
 } from './components/AppleDropdown';
 import {
   renderStageHudView,
@@ -84,6 +94,7 @@ import {
   renderTimelineDockView,
   syncTimelineDockActiveView,
   syncTimelineDockCollapseView,
+  updateTimelineDockMetadataView,
 } from './components/TimelineDockView';
 import {
   SurgicalAiScope,
@@ -97,13 +108,13 @@ import {
 } from './modals/CommandPaletteModal';
 import { openShortcutsHelpModalView } from './modals/ShortcutsHelpModal';
 import { FALLBACK_APP_VERSION, openAboutModalView } from './modals/AboutModal';
+import { attachModalDialogBehavior } from './core/ModalDialog';
 import {
-  openDeckDiagnosticsModal,
   openEnginePreferencesModal,
-  openIdleLoopModal,
   openStageSettingsPopover,
   openSurgicalAiModal,
   openTransitionTrimModal,
+  renderDiagnosticsGridMarkup,
   SequenceLayoutPreference,
 } from './modals/WorkspaceModals';
 import { Icons } from './icons';
@@ -125,6 +136,9 @@ declare global {
       setFullScreen: (flag: boolean) => Promise<boolean>;
       isFullScreen: () => Promise<boolean>;
       setWindowTitle?: (title: string) => Promise<void>;
+      setProjectDirty?: (dirty: boolean) => void;
+      onSaveBeforeQuit?: (callback: () => void) => () => void;
+      confirmQuit?: (payload: { proceed: boolean }) => void;
       getWindowState?: () => Promise<{
         mode: string;
         isFullScreen: boolean;
@@ -180,6 +194,19 @@ declare global {
       setLanguage?: (lang: 'ar' | 'en') => Promise<'ar' | 'en'>;
       setTheme?: (theme: 'system' | 'dark' | 'light') => Promise<'dark' | 'light'>;
       openProjectStreamedDialog?: () => Promise<OpenedProjectDescriptor | null>;
+      autosaveProject?: (payload: {
+        manifestJson: string;
+        assets: StreamingSaveAssetEntry[];
+        meta: { title: string; sourcePath: string | null; slideCount: number };
+      }) => Promise<{ ok: boolean }>;
+      clearAutosave?: () => Promise<void>;
+      onAutosaveRecovery?: (
+        callback: (payload: {
+          buffer: ArrayBuffer;
+          fileName?: string;
+          recoveredFromAutosave?: boolean;
+        }) => void
+      ) => () => void;
       openProjectByPath?: (filePath: string) => Promise<OpenedProjectDescriptor>;
       openDemoProject?: () => Promise<OpenedProjectDescriptor | null>;
       saveProjectStreamed?: (payload: StreamingSavePayload) => Promise<StreamingSaveResult | null>;
@@ -211,7 +238,7 @@ declare global {
         manifestJson: string;
       }) => Promise<{ filePath: string; fileName: string }>;
       consumePendingProjectFile?: () => Promise<
-        (OpenedProjectDescriptor & { buffer?: ArrayBuffer }) | null
+        (OpenedProjectDescriptor & { buffer?: ArrayBuffer; recoveredFromAutosave?: boolean }) | null
       >;
       onOpenProjectFile?: (
         callback: (payload: OpenedProjectDescriptor & { buffer?: ArrayBuffer }) => void
@@ -242,6 +269,8 @@ export class MotionPresentationApp {
   private isNavigatorVisible = false;
   private isInspectorVisible = true;
   private isInspectorOverlayMode = false;
+  private hasExplicitOverlayInspectorPref = false;
+  private wasInspectorDockableViewport = true;
   private sequenceLayoutPref: SequenceLayoutPreference = 'auto';
   private isStageOverviewOpen = false;
   private isSkinPopoverOpen = false;
@@ -259,6 +288,12 @@ export class MotionPresentationApp {
   private isSlideGridOpen = false;
   private isGeneratingDemo = false;
   private isSavingProject = false;
+  private isAutosaving = false;
+  private lastSyncedWindowTitle = '';
+  private autosaveTimer: number | null = null;
+  private lastAutosaveAt = 0;
+  private lastChangeAt = 0;
+  private readonly errorThrottle: ErrorReportThrottle = createErrorThrottle();
   private aiEditDraftInstruction = '';
   private aiEditScopeOverride: SurgicalAiScope | null = null;
   private currentProjectFilePath: string | null = null;
@@ -274,6 +309,8 @@ export class MotionPresentationApp {
   private onPresenterMouseMove: ((e: MouseEvent) => void) | null = null;
   private isModalOpen = false;
   private activeModalClose: (() => void) | null = null;
+  private stagePopoverClose: (() => void) | null = null;
+  private skinPopoverClose: (() => void) | null = null;
   private pendingRelinkTarget: string | string[] | null = null;
   private draggedSlideId: string | null = null;
   private navigatorSearchQuery = '';
@@ -335,6 +372,8 @@ export class MotionPresentationApp {
     this.bindDesktopWindowSync();
     this.bindGlobalShortcuts();
     this.bindNativeMenuCommands();
+    this.bindUnsavedChangesGuard();
+    this.bindGlobalErrorHandlers();
     this.bindDesktopProjectOpenEvents();
     this.store.subscribe((changeType) => this.onStoreUpdated(changeType));
     this.onStoreUpdated();
@@ -344,6 +383,7 @@ export class MotionPresentationApp {
   }
 
   public dispose(): void {
+    this.clearAutosaveTimer();
     if (this.resizeRafId !== null) {
       cancelAnimationFrame(this.resizeRafId);
       this.resizeRafId = null;
@@ -593,6 +633,20 @@ export class MotionPresentationApp {
     const prevToolbarTier = this.lastLayoutPlan?.toolbarTier;
     this.lastLayoutPlan = plan;
 
+    const canDockInspectorNow = !plan.focusMode && vw >= DOCKED_INSPECTOR_MIN_WIDTH;
+    if (!canDockInspectorNow && this.wasInspectorDockableViewport) {
+      if (!this.hasExplicitOverlayInspectorPref && this.isInspectorVisible) {
+        this.isInspectorVisible = false;
+        this.root.querySelector('#btn-toggle-inspector')?.classList.remove('active-pane');
+      }
+    } else if (canDockInspectorNow && !this.wasInspectorDockableViewport) {
+      if (!this.hasExplicitOverlayInspectorPref && !this.isInspectorVisible) {
+        this.isInspectorVisible = true;
+        this.root.querySelector('#btn-toggle-inspector')?.classList.add('active-pane');
+      }
+    }
+    this.wasInspectorDockableViewport = canDockInspectorNow;
+
     if (plan.focusMode) {
       splitView.classList.add('is-focus-mode');
       splitView.setAttribute('data-focus-tab', this.focusPaneTab);
@@ -731,7 +785,11 @@ export class MotionPresentationApp {
       const activeNav = this.isNavigatorVisible ? navW : 0;
       const activeInsp = this.isInspectorVisible ? inspW : 0;
 
-      if (activeNav + activeInsp > budget) {
+      if (this.lastLayoutPlan && this.lastLayoutPlan.inspectorMode !== 'docked' && this.isInspectorVisible) {
+        overlayInspector = true;
+        sheetInspector = this.lastLayoutPlan.inspectorMode === 'sheet';
+        inspW = Math.min(inspW, Math.max(260, Math.min(320, splitWidth - 28)));
+      } else if (activeNav + activeInsp > budget) {
         if (this.isInspectorVisible && activeNav + this.minInspectorWidth > budget) {
           overlayInspector = true;
           sheetInspector = false;
@@ -836,10 +894,202 @@ export class MotionPresentationApp {
     }
   }
 
+  /**
+   * Main-process quit handshake: after the user chooses "Save" in the unsaved-changes dialog,
+   * persist first and only then allow the window to close. Any failure keeps the app open.
+   */
+  private bindUnsavedChangesGuard(): void {
+    const api = window.desktopAPI;
+    if (api?.onSaveBeforeQuit) {
+      const unsubscribe = api.onSaveBeforeQuit(() => {
+        void this.handleSaveBeforeQuit();
+      });
+      if (unsubscribe) this.rootScope.addCleanup(unsubscribe);
+    }
+
+    // Leaving the window is the strongest "I am done editing" signal we get for free.
+    const onWindowBlur = () => {
+      if (this.store.isProjectDirty()) void this.runAutosaveTick();
+    };
+    window.addEventListener('blur', onWindowBlur);
+    this.rootScope.addCleanup(() => window.removeEventListener('blur', onWindowBlur));
+  }
+
+  private async handleSaveBeforeQuit(): Promise<void> {
+    const api = window.desktopAPI;
+    const outcome = decideQuitSave({
+      isDirty: this.store.isProjectDirty(),
+      slideCount: this.store.getSlides().length,
+      isSaving: this.isSavingProject,
+    });
+    if (outcome === 'proceed') {
+      api?.confirmQuit?.({ proceed: true });
+      return;
+    }
+    if (outcome === 'block') {
+      // Never risk losing the in-flight save; ask the user to close again once it settles.
+      api?.confirmQuit?.({ proceed: false });
+      return;
+    }
+    await this.handleSaveProject(false);
+    api?.confirmQuit?.({ proceed: !this.store.isProjectDirty() });
+  }
+
+  /**
+   * Debounced, throttled autosave. Best-effort by design: a failed autosave must never surface a
+   * blocking error, because the user still has the manual save path and the in-memory project.
+   */
+  private scheduleAutosave(delayMs = DEFAULT_AUTOSAVE_DEBOUNCE_MS): void {
+    if (typeof window === 'undefined' || !window.desktopAPI?.autosaveProject) return;
+    this.lastChangeAt = Date.now();
+    if (this.autosaveTimer !== null) return;
+    this.autosaveTimer = window.setTimeout(() => {
+      this.autosaveTimer = null;
+      void this.runAutosaveTick();
+    }, delayMs);
+  }
+
+  private async runAutosaveTick(): Promise<void> {
+    const now = Date.now();
+    const allowed = shouldAutosave({
+      isDirty: this.store.isProjectDirty(),
+      slideCount: this.store.getSlides().length,
+      isSaving: this.isSavingProject || this.isAutosaving,
+      isPresentingFullscreen: this.isPresentingFullscreen,
+      msSinceLastAutosave: now - this.lastAutosaveAt,
+      msSinceLastChange: now - this.lastChangeAt,
+    });
+
+    if (!allowed) {
+      const canRetryLater =
+        !this.isPresentingFullscreen &&
+        !this.isSavingProject &&
+        !this.isAutosaving &&
+        this.store.isProjectDirty() &&
+        this.store.getSlides().length > 0;
+      if (canRetryLater && this.autosaveTimer === null) {
+        const remainingMs = Math.max(
+          5000,
+          DEFAULT_AUTOSAVE_MIN_INTERVAL_MS - (now - this.lastAutosaveAt)
+        );
+        this.autosaveTimer = window.setTimeout(() => {
+          this.autosaveTimer = null;
+          void this.runAutosaveTick();
+        }, remainingMs);
+      }
+      return;
+    }
+
+    await this.performAutosave();
+  }
+
+  private async performAutosave(): Promise<void> {
+    if (typeof window === 'undefined') return;
+    const api = window.desktopAPI;
+    if (!api?.autosaveProject) return;
+    const project = this.store.getProject();
+    this.isAutosaving = true;
+    try {
+      const built = await buildStreamingSavePayload(project);
+      const result = await api.autosaveProject({
+        manifestJson: built.manifestJson,
+        assets: built.assets,
+        meta: {
+          title: project.title,
+          sourcePath: this.currentProjectFilePath,
+          slideCount: project.slides.length,
+        },
+      });
+      if (result?.ok) this.lastAutosaveAt = Date.now();
+    } catch {
+      // Autosave is best-effort; the manual save path reports real failures to the user.
+    } finally {
+      this.isAutosaving = false;
+    }
+  }
+
+  private clearAutosaveTimer(): void {
+    if (this.autosaveTimer !== null) {
+      window.clearTimeout(this.autosaveTimer);
+      this.autosaveTimer = null;
+    }
+  }
+
+  /**
+   * Drops any pending autosave snapshot: either the project was just saved for real, or a
+   * different document was opened and the old snapshot no longer describes what is on screen.
+   */
+  private clearAutosaveSnapshot(): void {
+    this.clearAutosaveTimer();
+    this.lastAutosaveAt = 0;
+    if (typeof window !== 'undefined') void window.desktopAPI?.clearAutosave?.();
+  }
+
+  /**
+   * Autosave is suspended while presenting; give it a chance to catch up once the show ends
+   * without pretending that "now" was a content change.
+   */
+  private resumeAutosaveAfterPresentation(): void {
+    if (typeof window === 'undefined' || !window.desktopAPI?.autosaveProject) return;
+    if (this.autosaveTimer !== null) return;
+    this.autosaveTimer = window.setTimeout(() => {
+      this.autosaveTimer = null;
+      void this.runAutosaveTick();
+    }, 1500);
+  }
+
+  /**
+   * Last-resort safety nets: a rejected promise or a thrown error anywhere in the studio must not
+   * silently break the UI. Both are logged with their stack and surfaced once per cooldown so a
+   * repeating failure cannot spam the user out of the app.
+   */
+  private bindGlobalErrorHandlers(): void {
+    const onUnhandledRejection = (event: unknown) => {
+      const reason = (event as { reason?: unknown })?.reason;
+      this.reportUnexpectedError(reason, 'unhandledrejection');
+    };
+    const onError = (event: unknown) => {
+      const err = (event as { error?: unknown })?.error;
+      const message = (event as { message?: unknown })?.message;
+      this.reportUnexpectedError(
+        err ?? (typeof message === 'string' ? message : null),
+        'error',
+        (err as { stack?: string })?.stack ?? null
+      );
+    };
+
+    window.addEventListener('unhandledrejection', onUnhandledRejection);
+    window.addEventListener('error', onError);
+    this.rootScope.addCleanup(() => {
+      window.removeEventListener('unhandledrejection', onUnhandledRejection);
+      window.removeEventListener('error', onError);
+    });
+  }
+
+  /**
+   * Logs a failure and offers a single non-blocking toast. Never throws: it is called from `catch`
+   * blocks and from global handlers, where a second failure would be unrecoverable.
+   */
+  private reportUnexpectedError(
+    reason: unknown,
+    source: GlobalErrorSource = 'error',
+    stackHint: string | null = null
+  ): void {
+    try {
+      const normalized = normalizeError(reason, source);
+      console.error(`[studio:${source}] ${normalized.message}`, {
+        stack: normalized.stack ?? stackHint ?? undefined,
+      });
+      if (!this.errorThrottle.shouldReport(normalized.message)) return;
+      this.store.notify(t('notify.unexpectedError', { message: normalized.message }), 'error', 6000);
+    } catch {
+      // Reporting must never become the source of a new failure.
+    }
+  }
+
   private bindDesktopWindowSync(): void {
     const api = window.desktopAPI;
     if (!api) return;
-
     void api.getWindowState?.()?.then?.((state) => {
       if (state && typeof state.zoomFactor === 'number') {
         this.currentZoomFactor = state.zoomFactor;
@@ -1242,8 +1492,10 @@ export class MotionPresentationApp {
       }
       this.syncToolbarUndoRedoState();
       this.updateNavigatorCaptions();
-      this.renderStudioTimelineDock();
-      this.renderInspectorPane();
+      this.updateStudioTimelineDockMetadata();
+      this.syncInspectorInPlaceOrRender();
+      this.syncWindowTitle();
+      this.scheduleAutosave();
       return;
     }
 
@@ -1255,7 +1507,9 @@ export class MotionPresentationApp {
       this.previewEngine.updateSettingsLive(settings);
       this.presenterEngine?.updateSettingsLive(settings);
       this.syncToolbarUndoRedoState();
-      this.renderInspectorPane();
+      this.syncInspectorInPlaceOrRender();
+      this.syncWindowTitle();
+      this.scheduleAutosave();
       return;
     }
 
@@ -1270,6 +1524,8 @@ export class MotionPresentationApp {
     this.reconcileWorkspaceLayout();
     this.applyPanelWidths(false);
     this.renderWindowToolbar();
+    this.syncWindowTitle();
+    this.scheduleAutosave();
     this.renderActivityRail();
     this.renderNavigatorPane();
     this.renderEmptyOverlay();
@@ -1279,7 +1535,11 @@ export class MotionPresentationApp {
     this.renderToast();
 
     const settings = this.store.getSettings();
-    const targetIdx = this.store.getActivePreviewIndex();
+    const selection = this.store.getSelection();
+    const targetIdx =
+      selection.type === 'settings'
+        ? (this.latestEngineStatus?.currentSlideIndex ?? this.store.getActivePreviewIndex())
+        : this.store.getActivePreviewIndex();
 
     this.updateCanvasFrameDimensions(settings);
     this.previewEngine.updateSettingsLive(settings);
@@ -1649,6 +1909,8 @@ export class MotionPresentationApp {
       align: 'end',
       minWidth: 246,
       ariaLabel: t('toolbar.moreActions'),
+      layerStack: this.layerStack,
+      layerId: 'toolbar-more-menu',
       items: [
         ...overflowItems,
         {
@@ -1685,23 +1947,19 @@ export class MotionPresentationApp {
           onSelect: () => this.openEnginePrefsSheet(),
         },
         {
-          label: t('inspector.deckStatsBtn'),
-          icon: Icons.info,
-          onSelect: () => this.openDeckStatsSheet(),
-        },
-        {
           label: t('toolbar.studioSkins'),
           icon: Icons.palette,
           onSelect: () => this.toggleSkinPopover(),
         },
         {
-          label: t('toolbar.shortcutsTitle'),
+          label: t('toolbar.shortcutsMenu'),
           icon: Icons.keyboard,
+          shortcut: '?',
           separatorBefore: true,
           onSelect: () => this.openShortcutsHelpModal(),
         },
         {
-          label: t('toolbar.commandPaletteTitle'),
+          label: t('toolbar.commandPalette'),
           icon: Icons.command,
           shortcut: 'Ctrl+K',
           onSelect: () => this.openCommandPalette(),
@@ -1728,7 +1986,16 @@ export class MotionPresentationApp {
   }
 
   private closeStageSettingsPopover(): void {
+    if (!this.isStageSettingsOpen) return;
+    if (this.stagePopoverClose) {
+      const fn = this.stagePopoverClose;
+      this.stagePopoverClose = null;
+      fn();
+      return;
+    }
     this.isStageSettingsOpen = false;
+    this.layerStack.remove('stage-settings-popover');
+    this.refreshModalOpenState();
     this.stagePopoverScope.clear();
     const host = this.root.querySelector('#stage-popover-host') as HTMLElement | null;
     if (host) host.innerHTML = '';
@@ -1744,16 +2011,23 @@ export class MotionPresentationApp {
     if (!host) return;
     this.isStageSettingsOpen = true;
     this.root.querySelector('#btn-stage-settings')?.classList.add('active-pane');
-    openStageSettingsPopover({
+    this.stagePopoverClose = openStageSettingsPopover({
       host,
       scope: this.stagePopoverScope,
       settings: this.store.getSettings(),
       sequenceLayoutPref: this.sequenceLayoutPref,
       anchorEl,
+      layerStack: this.layerStack,
       onUpdateSettings: (partial) => this.store.updateSettings(partial),
       onChangeSequenceLayout: (pref) => this.setSequenceLayoutPreference(pref),
-      onClose: () => this.closeStageSettingsPopover(),
+      onClose: () => {
+        this.stagePopoverClose = null;
+        this.isStageSettingsOpen = false;
+        this.refreshModalOpenState();
+        this.root.querySelector('#btn-stage-settings')?.classList.remove('active-pane');
+      },
     });
+    this.refreshModalOpenState();
   }
 
   private openEnginePrefsSheet(): void {
@@ -1762,34 +2036,11 @@ export class MotionPresentationApp {
       host,
       scope: this.workspaceModalScope,
       settings: this.store.getSettings(),
+      layerStack: this.layerStack,
       onUpdateSettings: (partial) => this.store.updateSettings(partial),
-      onClose: () => {},
+      onClose: () => this.refreshModalOpenState(),
     });
-  }
-
-  private openDeckStatsSheet(): void {
-    const host = this.root.querySelector('#workspace-modal-host') as HTMLElement | null;
-    const slides = this.store.getSlides();
-    const diag = this.store.getProjectDiagnostics?.() ?? {
-      slideCount: slides.length,
-      videoTransitionCount: 0,
-      proceduralTransitionCount: 0,
-      notesCount: 0,
-      estimatedDurationSec: 0,
-      totalMediaBytes: 0,
-    };
-    const missing = this.store.getMissingVideoAssets?.() ?? [];
-    openDeckDiagnosticsModal({
-      host,
-      scope: this.workspaceModalScope,
-      diagnostics: diag,
-      missingVideosCount: missing.length,
-      firstMissingFileName: missing[0]?.videoFileName,
-      onRelinkMissing: () => {
-        if (missing[0]) this.triggerRelinkVideo(missing[0].slideIds);
-      },
-      onClose: () => {},
-    });
+    this.refreshModalOpenState();
   }
 
   private openSurgicalAiSheet(activeSlide: SlideNode, slideIdx: number, defaultScope: 'slide' | 'transition'): void {
@@ -1806,6 +2057,7 @@ export class MotionPresentationApp {
       draftInstruction: this.aiEditDraftInstruction,
       aiMeta: this.store.getProjectAiSourceMeta(),
       currentVideoTimeSec: this.previewEngine?.getActiveVideoTimeSec?.() ?? null,
+      layerStack: this.layerStack,
       callbacks: {
         getAiMeta: () => this.store.getProjectAiSourceMeta(),
         setAiMeta: (meta) => this.store.setProjectAiSourceMeta(meta),
@@ -1818,8 +2070,9 @@ export class MotionPresentationApp {
           this.store.notify(t('notify.aiPromptCopied'), 'success', 2500);
         },
       },
-      onClose: () => {},
+      onClose: () => this.refreshModalOpenState(),
     });
+    this.refreshModalOpenState();
   }
 
   private closeSessionToWelcome(): void {
@@ -1961,6 +2214,9 @@ export class MotionPresentationApp {
       this.setFocusPaneTab(this.focusPaneTab === 'inspector' ? 'stage' : 'inspector');
       return;
     }
+    if (this.lastLayoutPlan && this.lastLayoutPlan.inspectorMode !== 'docked') {
+      this.hasExplicitOverlayInspectorPref = true;
+    }
     this.isInspectorVisible = !this.isInspectorVisible;
     const inspPane = this.root.querySelector('#inspector-pane');
     inspPane?.classList.toggle('collapsed', !this.isInspectorVisible);
@@ -1979,6 +2235,7 @@ export class MotionPresentationApp {
       this.isStageOverviewOpen = next;
     }
     this.renderStageOverviewGrid();
+    this.renderFloatingStageHud();
     this.renderActivityRail();
   }
 
@@ -1988,7 +2245,7 @@ export class MotionPresentationApp {
     this.renderActivityRail();
     this.renderInspectorPane();
     if (this.isSkinPopoverOpen) {
-      this.renderSkinPopover();
+      this.renderSkinPopover(this.skinPopoverFromRail, `[data-pick-skin="${skinId}"]`);
     }
   }
 
@@ -2003,17 +2260,26 @@ export class MotionPresentationApp {
   }
 
   private closeSkinPopover(): void {
+    if (this.skinPopoverClose) {
+      const fn = this.skinPopoverClose;
+      this.skinPopoverClose = null;
+      fn();
+      return;
+    }
     this.isSkinPopoverOpen = false;
     this.skinPopoverFromRail = false;
+    this.layerStack.remove('skin-popover');
+    this.refreshModalOpenState();
     this.skinPopoverScope.clear();
     const host = this.root.querySelector('#skin-popover-host') as HTMLElement | null;
     if (host) host.innerHTML = '';
   }
 
-  private renderSkinPopover(fromRail = this.skinPopoverFromRail): void {
+  private renderSkinPopover(fromRail = this.skinPopoverFromRail, restoreFocusSelector?: string): void {
     const host = this.root.querySelector('#skin-popover-host') as HTMLElement | null;
     if (!host) return;
     this.skinPopoverScope.clear();
+    this.layerStack.remove('skin-popover');
     const activeSkin = getStudioSkin();
     const themePref = getThemePreference();
     const railBtnRect = (this.root.querySelector('#rail-btn-skins') as HTMLElement | null)?.getBoundingClientRect?.();
@@ -2021,7 +2287,7 @@ export class MotionPresentationApp {
 
     host.innerHTML = `
       <div class="skin-popover-backdrop apple-popover-backdrop ${anchorToRail ? '' : 'is-centered'}" id="skin-popover-backdrop">
-        <div class="skin-popover-card apple-skin-popover" id="skin-popover-card" role="dialog" aria-label="${this.escapeHtml(t('skin.popoverTitle'))}">
+        <div class="skin-popover-card apple-skin-popover" id="skin-popover-card" role="dialog" aria-modal="true" aria-label="${this.escapeHtml(t('skin.popoverTitle'))}">
           <div class="skin-popover-head">
             <span>${Icons.palette} <span>${this.escapeHtml(t('skin.popoverTitle'))}</span></span>
             <button type="button" class="btn btn-icon-only btn-xs" id="btn-close-skin-popover" aria-label="${this.escapeHtml(t('modal.close'))}">
@@ -2044,8 +2310,8 @@ export class MotionPresentationApp {
                     <span class="skin-swatch-acc" style="background:${sk.swatchAccent};"></span>
                   </span>
                   <span class="skin-option-text">
-                    <strong>${this.escapeHtml(sk.name)}</strong>
-                    <span>${this.escapeHtml(sk.tagline)}</span>
+                    <strong><bdi dir="ltr">${this.escapeHtml(sk.name)}</bdi></strong>
+                    <span>${this.escapeHtml(t(`skin.tagline.${sk.id}` as Parameters<typeof t>[0]))}</span>
                   </span>
                   ${active ? `<span class="skin-active-check">${Icons.check}</span>` : ''}
                 </button>
@@ -2056,11 +2322,45 @@ export class MotionPresentationApp {
       </div>
     `;
 
-    const backdrop = host.querySelector('#skin-popover-backdrop');
-    const card = host.querySelector('#skin-popover-card');
-    this.skinPopoverScope.listen(backdrop, 'click', (e) => {
-      if (e.target === backdrop) this.closeSkinPopover();
+    const backdrop = host.querySelector('#skin-popover-backdrop') as HTMLElement;
+    const card = host.querySelector('#skin-popover-card') as HTMLElement | null;
+    if (anchorToRail && railBtnRect && card) {
+      const vw = (typeof window !== 'undefined' && window.innerWidth) || 1280;
+      const vh = (typeof window !== 'undefined' && window.innerHeight) || 800;
+      const cardW = 332;
+      const cardH = Math.min(vh - 32, Math.max(360, card.getBoundingClientRect?.().height || 440));
+      const rtl = isRtlLanguage();
+      const left = rtl
+        ? Math.max(12, railBtnRect.left - cardW - 10)
+        : Math.min(vw - cardW - 12, railBtnRect.right + 10);
+      const top = Math.max(52, Math.min(vh - cardH - 12, railBtnRect.top));
+      card.style.position = 'fixed';
+      card.style.left = `${Math.round(left)}px`;
+      card.style.top = `${Math.round(top)}px`;
+    }
+
+    const initialTarget = restoreFocusSelector
+      ? (host.querySelector(restoreFocusSelector) as HTMLElement | null)
+      : null;
+
+    this.skinPopoverClose = attachModalDialogBehavior({
+      host,
+      scope: this.skinPopoverScope,
+      backdropEl: backdrop,
+      dialogEl: card,
+      layerStack: this.layerStack,
+      layerId: 'skin-popover',
+      layerKind: 'popover',
+      initialFocusEl: initialTarget,
+      onAfterClose: () => {
+        this.skinPopoverClose = null;
+        this.isSkinPopoverOpen = false;
+        this.skinPopoverFromRail = false;
+        this.refreshModalOpenState();
+      },
     });
+    this.refreshModalOpenState();
+
     this.skinPopoverScope.listen(card, 'click', (e) => e.stopPropagation());
     this.skinPopoverScope.listen(host.querySelector('#btn-close-skin-popover'), 'click', () => {
       this.closeSkinPopover();
@@ -2074,7 +2374,7 @@ export class MotionPresentationApp {
         this.renderWindowToolbar();
         this.renderActivityRail();
         this.renderInspectorPane();
-        this.renderSkinPopover();
+        this.renderSkinPopover(this.skinPopoverFromRail, `[data-pick-theme="${nextPref}"]`);
       });
     });
     host.querySelectorAll('[data-pick-skin]').forEach((btn) => {
@@ -2082,14 +2382,8 @@ export class MotionPresentationApp {
         const id = (btn as HTMLElement).dataset.pickSkin as StudioSkinId | undefined;
         if (id) {
           this.applySkinSelection(id);
-          this.closeSkinPopover();
         }
       });
-    });
-    this.skinPopoverScope.listen(window, 'keydown', (ev) => {
-      if ((ev as KeyboardEvent).key === 'Escape') {
-        this.closeSkinPopover();
-      }
     });
   }
 
@@ -2234,7 +2528,7 @@ export class MotionPresentationApp {
         </div>
         <button type="button" class="btn btn-xs" id="btn-close-overview-grid">
           ${Icons.close}
-          <span>${this.escapeHtml(t('nav.clearSelection'))}</span>
+          <span>${this.escapeHtml(t('modal.close'))}</span>
         </button>
       </div>
       <div class="overview-bento-cards">
@@ -2287,9 +2581,15 @@ export class MotionPresentationApp {
   private syncWindowTitle(): void {
     const appName = t('app.name');
     const title = this.store.getProject().title?.trim() || appName;
-    const fullTitle = `${title} — ${appName}`;
+    const dirty = this.store.isProjectDirty();
+    const fullTitle = `${dirty ? '• ' : ''}${title} — ${appName}`;
     document.title = fullTitle;
-    void window.desktopAPI?.setWindowTitle?.(fullTitle);
+    if (typeof window !== 'undefined') {
+      window.desktopAPI?.setProjectDirty?.(dirty);
+    }
+    if (this.lastSyncedWindowTitle === fullTitle) return;
+    this.lastSyncedWindowTitle = fullTitle;
+    if (typeof window !== 'undefined') void window.desktopAPI?.setWindowTitle?.(fullTitle);
   }
 
   private bindDesktopProjectOpenEvents(): void {
@@ -2307,6 +2607,12 @@ export class MotionPresentationApp {
         );
       }
     });
+
+    const unsubscribeAutosave = window.desktopAPI?.onAutosaveRecovery?.((payload) => {
+      if (!payload?.buffer) return;
+      void this.applyAutosaveRecovery(payload.buffer, payload.fileName);
+    });
+    if (unsubscribeAutosave) this.rootScope.addCleanup(unsubscribeAutosave);
   }
 
   private async consumeInitialProjectFile(): Promise<void> {
@@ -2316,11 +2622,15 @@ export class MotionPresentationApp {
       if (pending.projectToken && typeof pending.manifestJson === 'string') {
         await this.openDesktopStreamedProject(pending);
       } else if (pending.buffer) {
-        await this.openProjectFromBytes(
-          new Uint8Array(pending.buffer),
-          pending.fileName,
-          pending.filePath
-        );
+        if (pending.recoveredFromAutosave) {
+          await this.applyAutosaveRecovery(pending.buffer, pending.fileName);
+        } else {
+          await this.openProjectFromBytes(
+            new Uint8Array(pending.buffer),
+            pending.fileName,
+            pending.filePath
+          );
+        }
       }
     } catch (err) {
       this.store.notify(
@@ -2328,6 +2638,25 @@ export class MotionPresentationApp {
         'error'
       );
     }
+  }
+
+  private async applyAutosaveRecovery(buffer: ArrayBuffer, fileName?: string): Promise<void> {
+    await this.openProjectFromBytes(
+      new Uint8Array(buffer),
+      fileName || 'autosave-recovery.mpres',
+      null,
+      { markSaved: false }
+    );
+    this.store.markProjectDirty();
+    this.syncWindowTitle();
+    this.store.notify(t('notify.projectRestoredFromAutosave'), 'warning', 9000);
+  }
+
+  private refreshModalOpenState(): void {
+    this.isModalOpen =
+      this.layerStack.hasKind('modal') ||
+      this.layerStack.hasKind('command-palette') ||
+      this.layerStack.hasKind('popover');
   }
 
   private async openDesktopStreamedProject(opened: OpenedProjectDescriptor): Promise<void> {
@@ -2341,6 +2670,8 @@ export class MotionPresentationApp {
       this.store.notify(t('notify.openProjectProgress', { name: opened.fileName }), 'info', 2500);
       const data = await this.store.loadOpenedDesktopProject(opened);
       this.currentProjectFilePath = opened.filePath || null;
+      this.store.markProjectSaved();
+      this.clearAutosaveSnapshot();
       this.syncWindowTitle();
       void this.recordCurrentProjectAsRecent(opened.filePath, opened.fileName);
       if (opened.recoveredFromBackup) {
@@ -2359,7 +2690,8 @@ export class MotionPresentationApp {
   private async openProjectFromBytes(
     bytes: Uint8Array,
     fileName: string,
-    filePath?: string | null
+    filePath?: string | null,
+    options?: { markSaved?: boolean }
   ): Promise<void> {
     try {
       if (this.isPresentingFullscreen) {
@@ -2372,6 +2704,12 @@ export class MotionPresentationApp {
       const parsed = ProjectSerializer.parseProjectBytes(bytes);
       await this.store.loadProjectBundle(parsed);
       this.currentProjectFilePath = filePath || null;
+      if (options?.markSaved === false) {
+        this.store.markProjectDirty();
+      } else {
+        this.store.markProjectSaved();
+        this.clearAutosaveSnapshot();
+      }
       this.syncWindowTitle();
       void this.recordCurrentProjectAsRecent(filePath, fileName);
       this.store.notify(
@@ -2428,6 +2766,8 @@ export class MotionPresentationApp {
 
         this.currentProjectFilePath = result.filePath;
         this.store.setProjectToken(result.projectToken);
+        this.store.markProjectSaved();
+        this.clearAutosaveSnapshot();
         this.syncWindowTitle();
         void this.recordCurrentProjectAsRecent(result.filePath, result.fileName);
         this.store.notify(t('notify.saveProjectSuccess', { name: result.fileName }), 'success');
@@ -2465,11 +2805,16 @@ export class MotionPresentationApp {
 
         if (!result) return;
         this.currentProjectFilePath = result.filePath;
+        this.store.markProjectSaved();
+        this.clearAutosaveSnapshot();
         this.syncWindowTitle();
         void this.recordCurrentProjectAsRecent(result.filePath, result.fileName);
         this.store.notify(t('notify.saveProjectSuccess', { name: result.fileName }), 'success');
       } else {
         ProjectSerializer.triggerBundleDownload(project.title, bundleBytes);
+        this.store.markProjectSaved();
+        this.clearAutosaveSnapshot();
+        this.syncWindowTitle();
         this.store.notify(t('notify.saveProjectSuccessDefault'), 'success');
       }
     } catch (err) {
@@ -2545,6 +2890,9 @@ export class MotionPresentationApp {
     const pane = this.root.querySelector('#navigator-pane') as HTMLElement;
     if (!pane) return;
 
+    const prevNavList = pane.querySelector('.navigator-list') as HTMLElement | null;
+    const prevNavScrollTop = prevNavList ? prevNavList.scrollTop : null;
+
     pane.classList.toggle('collapsed', !this.isNavigatorVisible);
 
     const slides = this.store.getSlides();
@@ -2579,7 +2927,7 @@ export class MotionPresentationApp {
             </button>
           </div>
           <div class="nav-context-banner-sub" title="${this.escapeHtml(firstMissing.videoFileName)}">
-            ${this.escapeHtml(firstMissing.videoFileName)}
+            <bdi dir="ltr">${this.escapeHtml(firstMissing.videoFileName)}</bdi>
           </div>
         </div>
       `;
@@ -2597,7 +2945,7 @@ export class MotionPresentationApp {
             </button>
           </div>
           <div class="nav-context-banner-sub" title="${this.escapeHtml(reelContext.videoAsset.name)}">
-            ${this.escapeHtml(reelContext.videoAsset.name)}
+            <bdi dir="ltr">${this.escapeHtml(reelContext.videoAsset.name)}</bdi>
           </div>
         </div>
       `;
@@ -2700,7 +3048,7 @@ export class MotionPresentationApp {
                     <img src="${startThumb}" alt="" draggable="false" />
                     <img src="${endThumb}" alt="" draggable="false" />
                   </span>
-                  <span class="filmstrip-text">${
+                  <span class="filmstrip-text" dir="ltr" style="unicode-bidi: isolate;">${
                     hasSlice
                       ? `${segStart.toFixed(1)}s → ${segEnd.toFixed(1)}s`
                       : this.escapeHtml(vid.name)
@@ -3156,6 +3504,11 @@ export class MotionPresentationApp {
     if (this.navigatorSearchQuery.trim() || this.navigatorFilterMode !== 'all') {
       this.applyNavigatorFilter();
     }
+
+    const nextNavList = pane.querySelector('.navigator-list') as HTMLElement | null;
+    if (nextNavList && prevNavScrollTop !== null) {
+      nextNavList.scrollTop = prevNavScrollTop;
+    }
   }
 
   private applyNavigatorFilter(): void {
@@ -3255,6 +3608,10 @@ export class MotionPresentationApp {
       }
     );
 
+    if (this.isStageOverviewOpen || this.isSlideGridOpen) {
+      hud.style.display = 'none';
+    }
+
     if (slides.length > 0) {
       this.syncNavigatorActiveSlide(idx);
     }
@@ -3301,13 +3658,12 @@ export class MotionPresentationApp {
   /* =========================================================================
    * 4. TRAILING PANE: INSPECTOR WITH MACOS SEGMENTED CONTROL
    * ========================================================================= */
-  private renderInspectorPane(): void {
-    const pane = this.root.querySelector('#inspector-pane') as HTMLElement;
-    if (!pane) return;
-
-    pane.classList.toggle('collapsed', !this.isInspectorVisible);
-    pane.classList.toggle('is-overlay-drawer', this.isInspectorOverlayMode && this.isInspectorVisible);
-
+  private getInspectorTargetState(): {
+    slides: SlideNode[];
+    settings: PresentationSettings;
+    activeSlide: SlideNode | undefined;
+    activeSegment: 'slide' | 'transition' | 'settings';
+  } {
     const selection = this.store.getSelection();
     const slides = this.store.getSlides();
     const settings = this.store.getSettings();
@@ -3317,7 +3673,7 @@ export class MotionPresentationApp {
         ? slides.find((s) => s.id === selection.slideId) || slides[0]
         : slides[this.store.getActivePreviewIndex()] || slides[0];
 
-    const activeSegment =
+    const activeSegment: 'slide' | 'transition' | 'settings' =
       !activeSlide
         ? 'settings'
         : selection.type === 'slide'
@@ -3326,7 +3682,158 @@ export class MotionPresentationApp {
             ? 'transition'
             : 'settings';
 
-    let contentHtml = '';
+    return { slides, settings, activeSlide, activeSegment };
+  }
+
+  private syncInspectorInPlaceOrRender(): void {
+    const pane = this.root.querySelector('#inspector-pane') as HTMLElement | null;
+    if (!pane) return;
+
+    const { settings, activeSlide, activeSegment } = this.getInspectorTargetState();
+    const targetSlideId = activeSlide?.id ?? '';
+
+    if (
+      pane.dataset?.inspSegment !== activeSegment ||
+      pane.dataset?.inspSlideId !== targetSlideId
+    ) {
+      this.renderInspectorPane();
+      return;
+    }
+
+    pane.classList.toggle('collapsed', !this.isInspectorVisible);
+    pane.classList.toggle('is-overlay-drawer', this.isInspectorOverlayMode && this.isInspectorVisible);
+
+    const activeEl = typeof document !== 'undefined' ? document.activeElement : null;
+
+    if (activeSegment === 'slide' && activeSlide) {
+      const titleIn = pane.querySelector('#insp-slide-title') as HTMLInputElement | null;
+      if (titleIn && activeEl !== titleIn) {
+        titleIn.value = activeSlide.title;
+      }
+
+      const holdIn = pane.querySelector('#insp-slide-hold') as HTMLInputElement | null;
+      if (holdIn && activeEl !== holdIn) {
+        holdIn.value = activeSlide.holdDurationSec != null ? String(activeSlide.holdDurationSec) : '';
+      }
+
+      const holdLbl = pane.querySelector('#lbl-slide-hold') as HTMLElement | null;
+      if (holdLbl) {
+        holdLbl.textContent = activeSlide.holdDurationSec
+          ? `${activeSlide.holdDurationSec}s`
+          : t('inspector.manualHold');
+      }
+
+      const notesIn = pane.querySelector('#insp-slide-notes') as HTMLTextAreaElement | null;
+      if (notesIn && activeEl !== notesIn) {
+        notesIn.value = activeSlide.notes || '';
+      }
+      return;
+    }
+
+    if (activeSegment === 'transition' && activeSlide) {
+      const spec = activeSlide.transitionToNext;
+      const speedIn = pane.querySelector('#insp-trans-speed') as HTMLInputElement | null;
+      const speedLbl = pane.querySelector('#lbl-trans-speed') as HTMLElement | null;
+      if (speedIn && activeEl !== speedIn) {
+        speedIn.value = String(spec.playbackSpeed);
+      }
+      if (speedLbl) {
+        speedLbl.textContent = `${spec.playbackSpeed.toFixed(2)}×`;
+      }
+
+      const mutedCheck = pane.querySelector('#insp-trans-muted') as HTMLInputElement | null;
+      if (mutedCheck && activeEl !== mutedCheck) {
+        mutedCheck.checked = Boolean(spec.muted);
+      }
+
+      const fallbackSelect = pane.querySelector('#insp-fallback-style') as HTMLSelectElement | null;
+      if (fallbackSelect) {
+        fallbackSelect.value = spec.fallbackStyle;
+        syncAppleSelectDisplay(fallbackSelect);
+      }
+
+      const fallbackDurIn = pane.querySelector('#insp-fallback-duration') as HTMLInputElement | null;
+      if (fallbackDurIn && activeEl !== fallbackDurIn) {
+        fallbackDurIn.value = String(spec.fallbackDurationMs || 700);
+      }
+
+      const easingSelect = pane.querySelector('#insp-trans-easing') as HTMLSelectElement | null;
+      if (easingSelect) {
+        easingSelect.value = spec.easing || 'ease-in-out';
+        syncAppleSelectDisplay(easingSelect);
+      }
+      return;
+    }
+
+    if (activeSegment === 'settings') {
+      const ratioSel = pane.querySelector('#set-aspect-ratio') as HTMLSelectElement | null;
+      if (ratioSel) {
+        ratioSel.value = settings.aspectRatio;
+        syncAppleSelectDisplay(ratioSel);
+      }
+
+      const fitSel = pane.querySelector('#set-fit-mode') as HTMLSelectElement | null;
+      if (fitSel) {
+        fitSel.value = settings.fitMode;
+        syncAppleSelectDisplay(fitSel);
+      }
+
+      const bgHex = settings.stageBackground || '#05070B';
+      const stageBg = pane.querySelector('#set-stage-bg') as HTMLInputElement | null;
+      if (stageBg && activeEl !== stageBg) {
+        stageBg.value = bgHex;
+      }
+      const stageBgText = pane.querySelector('#set-stage-bg-text') as HTMLInputElement | null;
+      if (stageBgText && activeEl !== stageBgText) {
+        stageBgText.value = bgHex;
+      }
+
+      pane.querySelectorAll('.stage-swatch-btn').forEach((btn) => {
+        const hex = (btn as HTMLElement).dataset.stageHex || '';
+        const active = bgHex.toUpperCase() === hex.toUpperCase();
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+
+      const volInput = pane.querySelector('#set-master-volume') as HTMLInputElement | null;
+      const volLbl = pane.querySelector('#lbl-master-volume') as HTMLElement | null;
+      const volVal = settings.masterVolume ?? 0.9;
+      if (volInput && activeEl !== volInput) {
+        volInput.value = String(volVal);
+      }
+      if (volLbl) {
+        volLbl.textContent = `${Math.round(volVal * 100)}%`;
+      }
+
+      const muteCheck = pane.querySelector('#set-master-muted') as HTMLInputElement | null;
+      if (muteCheck && activeEl !== muteCheck) {
+        muteCheck.checked = Boolean(settings.masterMuted);
+      }
+
+      const loopCheck = pane.querySelector('#set-loop') as HTMLInputElement | null;
+      if (loopCheck && activeEl !== loopCheck) {
+        loopCheck.checked = Boolean(settings.loopPresentation);
+      }
+    }
+  }
+
+  private renderInspectorPane(): void {
+    const pane = this.root.querySelector('#inspector-pane') as HTMLElement;
+    if (!pane) return;
+
+    const prevScrollEl = pane.querySelector('.inspector-scroll') as HTMLElement | null;
+    const prevScrollTop = prevScrollEl ? prevScrollEl.scrollTop : 0;
+
+    pane.classList.toggle('collapsed', !this.isInspectorVisible);
+    pane.classList.toggle('is-overlay-drawer', this.isInspectorOverlayMode && this.isInspectorVisible);
+
+    const { slides, settings, activeSlide, activeSegment } = this.getInspectorTargetState();
+    if (pane.dataset) {
+      pane.dataset.inspSegment = activeSegment;
+      pane.dataset.inspSlideId = activeSlide?.id ?? '';
+    }
+
+    let contentHtml: string;
 
     if (activeSegment === 'slide' && activeSlide) {
       const slideIdx = slides.findIndex((s) => s.id === activeSlide.id);
@@ -3364,7 +3871,7 @@ export class MotionPresentationApp {
           <div class="prop-row">
             <label class="prop-label" for="insp-slide-hold">
               <span>${t('inspector.autoAdvanceLabel')}</span>
-              <span class="tabular-nums" style="color: var(--label-secondary);">
+              <span class="tabular-nums" id="lbl-slide-hold" style="color: var(--label-secondary);">
                 ${activeSlide.holdDurationSec ? `${activeSlide.holdDurationSec}s` : t('inspector.manualHold')}
               </span>
             </label>
@@ -3399,12 +3906,31 @@ export class MotionPresentationApp {
           <div class="inspector-group-title">
             <span>${t('inspector.advancedToolsSection')}</span>
           </div>
-          <div class="inspector-tools-stack">
-            <button type="button" class="btn inspector-tool-btn" id="btn-open-idle-loop-modal">
-              ${Icons.infinityLoop}
-              <span>${t('inspector.idleLoopBtn')}</span>
+          <div class="inspector-filmstrip-box" id="insp-idle-loop-card">
+            <div class="prop-label" style="margin-bottom:0;">
+              <span style="display:inline-flex;align-items:center;gap:6px;">${Icons.infinityLoop}<span>${t('inspector.idleLoopBtn')}</span></span>
               <span class="inspector-tool-badge ${hasLoop ? 'is-active' : ''}">${hasLoop ? t('inspector.idleLoopActive') : t('inspector.idleLoopOff')}</span>
-            </button>
+            </div>
+            <div class="prop-subtext" style="word-break:break-all;">
+              ${
+                activeSlide.idleLoopAsset
+                  ? `<bdi dir="ltr">${this.escapeHtml(activeSlide.idleLoopAsset.name)}</bdi> (${activeSlide.idleLoopAsset.durationSec.toFixed(1)}s)`
+                  : this.escapeHtml(t('inspector.idleLoopNone'))
+              }
+            </div>
+            <div style="display:flex;gap:6px;">
+              <button type="button" class="btn btn-xs" id="btn-insp-assign-idle" style="flex:1;">
+                ${Icons.infinityLoop}
+                <span>${this.escapeHtml(hasLoop ? t('inspector.idleLoopReplace') : t('inspector.idleLoopAssign'))}</span>
+              </button>
+              ${
+                hasLoop
+                  ? `<button type="button" class="btn btn-xs btn-destructive" id="btn-insp-remove-idle" aria-label="${this.escapeHtml(t('inspector.idleLoopRemove'))}">${Icons.trash}<span>${this.escapeHtml(t('inspector.idleLoopRemove'))}</span></button>`
+                  : ''
+              }
+            </div>
+          </div>
+          <div class="inspector-tools-stack">
             <button type="button" class="btn inspector-tool-btn" id="btn-open-ai-edit-modal">
               ${Icons.sparkles}
               <span>${t('inspector.aiEditModalBtn')}</span>
@@ -3463,7 +3989,7 @@ export class MotionPresentationApp {
               <img src="${vid.thumbnailUrl || ''}" alt="${this.escapeHtml(t('inspector.startFrameAlt'))}" />
               <div class="inspector-video-compact-meta">
                 <span class="inspector-file-name" title="${this.escapeHtml(vid.name)}"><bdi dir="ltr">${this.escapeHtml(vid.name)}</bdi></span>
-                <span class="prop-subtext tabular-nums">${vid.width}×${vid.height} · ${segStart.toFixed(1)}s–${segEnd.toFixed(1)}s</span>
+                <span class="prop-subtext tabular-nums" dir="ltr" style="unicode-bidi: isolate;">${vid.width}×${vid.height} · ${segStart.toFixed(1)}s–${segEnd.toFixed(1)}s</span>
               </div>
             </div>
             <div class="inspector-tools-row" style="margin-bottom: 8px;">
@@ -3593,13 +4119,15 @@ export class MotionPresentationApp {
       `;
     } else {
       const currentSkin = getStudioSkin();
+      const missing = this.store.getMissingVideoAssets();
+      const diag = this.store.getProjectDiagnostics();
       contentHtml = `
         <div class="inspector-group">
           <div class="inspector-group-title">
             <span>${t('inspector.stageQuickSection')}</span>
           </div>
 
-          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+          <div class="inspector-stage-selects-row">
             <div class="prop-row">
               <label class="prop-label" for="set-aspect-ratio">${t('settings.aspectRatioLabel')}</label>
               <select class="select-field" id="set-aspect-ratio">
@@ -3618,11 +4146,11 @@ export class MotionPresentationApp {
             </div>
           </div>
 
-          <div class="prop-row">
+          <div class="prop-row-inline">
             <label class="prop-label" for="set-stage-bg">${t('settings.stageBgLabel')}</label>
-            <div style="display: flex; gap: 8px; align-items: center;">
-              <input type="color" id="set-stage-bg" value="${settings.stageBackground || '#05070B'}" style="width: 34px; height: 26px; padding: 0; border: none; background: transparent; cursor: pointer;" />
-              <input type="text" id="set-stage-bg-text" class="input-field tabular-nums" value="${settings.stageBackground || '#05070B'}" style="flex: 1;" />
+            <div class="stage-color-composite">
+              <input type="color" id="set-stage-bg" class="stage-color-picker" value="${settings.stageBackground || '#05070B'}" />
+              <input type="text" id="set-stage-bg-text" class="stage-hex-input tabular-nums" dir="ltr" value="${settings.stageBackground || '#05070B'}" aria-label="Hex" />
             </div>
           </div>
 
@@ -3655,14 +4183,16 @@ export class MotionPresentationApp {
             </div>
           </div>
 
-          <div class="prop-row-inline">
-            <label class="prop-label" for="set-master-muted" style="cursor: pointer;">${t('settings.masterMutedLabel')}</label>
-            <input type="checkbox" id="set-master-muted" ${settings.masterMuted ? 'checked' : ''} />
-          </div>
+          <div class="inspector-toggle-stack">
+            <div class="prop-row-inline">
+              <label class="prop-label" for="set-master-muted" style="cursor: pointer;">${t('settings.masterMutedLabel')}</label>
+              <input type="checkbox" id="set-master-muted" ${settings.masterMuted ? 'checked' : ''} />
+            </div>
 
-          <div class="prop-row-inline" style="margin-bottom: 0;">
-            <label class="prop-label" for="set-loop" style="cursor: pointer;">${t('settings.loopLabel')}</label>
-            <input type="checkbox" id="set-loop" ${settings.loopPresentation ? 'checked' : ''} />
+            <div class="prop-row-inline" style="margin-bottom: 0;">
+              <label class="prop-label" for="set-loop" style="cursor: pointer;">${t('settings.loopLabel')}</label>
+              <input type="checkbox" id="set-loop" ${settings.loopPresentation ? 'checked' : ''} />
+            </div>
           </div>
         </div>
 
@@ -3675,16 +4205,37 @@ export class MotionPresentationApp {
               ${Icons.sliders}
               <span>${t('inspector.enginePrefsBtn')}</span>
             </button>
-            <button type="button" class="btn inspector-tool-btn" id="btn-open-deck-stats-modal">
-              ${Icons.info}
-              <span>${t('inspector.deckStatsBtn')}</span>
-            </button>
             <button type="button" class="btn inspector-tool-btn" id="btn-open-skins-from-insp">
               ${Icons.palette}
               <span>${t('inspector.skinBtn')}</span>
               <span class="inspector-tool-badge">${this.escapeHtml(currentSkin)}</span>
             </button>
           </div>
+        </div>
+
+        <div class="inspector-group" id="insp-deck-diagnostics-group">
+          <div class="inspector-group-title">
+            <span>${t('modal.deckStatsTitle')}</span>
+            ${Icons.info}
+          </div>
+          ${
+            missing.length > 0
+              ? `
+            <div class="inspector-alert-box" style="margin-bottom:8px;">
+              <span style="display:inline-flex;align-items:center;gap:6px;font-weight:600;color:var(--signal-danger-text);">
+                ${Icons.alertCircle}
+                <span>${this.escapeHtml(t('nav.unlinkedText'))}</span>
+              </span>
+              ${missing[0]?.videoFileName ? `<span class="prop-subtext" dir="ltr">${this.escapeHtml(missing[0].videoFileName)}</span>` : ''}
+              <button type="button" class="btn btn-xs btn-prominent" id="btn-insp-relink-deck-video">
+                ${Icons.relink}
+                <span>${this.escapeHtml(t('nav.relinkBtn'))}</span>
+              </button>
+            </div>
+          `
+              : ''
+          }
+          ${renderDiagnosticsGridMarkup(diag)}
         </div>
       `;
     }
@@ -3772,25 +4323,17 @@ export class MotionPresentationApp {
         input.click();
       });
 
-      pane.querySelector('#btn-open-idle-loop-modal')?.addEventListener('click', () => {
-        const host = this.root.querySelector('#workspace-modal-host') as HTMLElement | null;
-        openIdleLoopModal({
-          host,
-          scope: this.workspaceModalScope,
-          slide: activeSlide,
-          onAssignLoop: () => {
-            const input = this.root.querySelector('#single-video-input') as HTMLInputElement;
-            if (!input) return;
-            delete input.dataset.targetSlideId;
-            input.dataset.idleLoopSlideId = activeSlide.id;
-            input.click();
-          },
-          onRemoveLoop: () => {
-            this.store.setSlideIdleLoopVideo(activeSlide.id, null);
-            this.store.notify(t('notify.idleLoopRemoved'), 'info');
-          },
-          onClose: () => {},
-        });
+      pane.querySelector('#btn-insp-assign-idle')?.addEventListener('click', () => {
+        const input = this.root.querySelector('#single-video-input') as HTMLInputElement;
+        if (!input) return;
+        delete input.dataset.targetSlideId;
+        input.dataset.idleLoopSlideId = activeSlide.id;
+        input.click();
+      });
+
+      pane.querySelector('#btn-insp-remove-idle')?.addEventListener('click', () => {
+        this.store.setSlideIdleLoopVideo(activeSlide.id, null);
+        this.store.notify(t('notify.idleLoopRemoved'), 'info');
       });
 
       pane.querySelector('#btn-open-ai-edit-modal')?.addEventListener('click', () => {
@@ -3848,6 +4391,7 @@ export class MotionPresentationApp {
             slide: activeSlide,
             nextSlide,
             currentStageVideoTimeSec: this.latestEngineStatus?.currentVideoTimeSec ?? undefined,
+            layerStack: this.layerStack,
             onCommitRange: (nextStart, nextEnd) =>
               this.store.updateTransitionRange(activeSlide.id, nextStart, nextEnd),
             onSplitAtTime: async (chosenSec) =>
@@ -3866,8 +4410,9 @@ export class MotionPresentationApp {
                 }
               : undefined,
             onNotify: (msg, kind) => this.store.notify(msg, kind),
-            onClose: () => {},
+            onClose: () => this.refreshModalOpenState(),
           });
+          this.refreshModalOpenState();
         });
       }
 
@@ -3992,8 +4537,11 @@ export class MotionPresentationApp {
         this.openEnginePrefsSheet();
       });
 
-      pane.querySelector('#btn-open-deck-stats-modal')?.addEventListener('click', () => {
-        this.openDeckStatsSheet();
+      pane.querySelector('#btn-insp-relink-deck-video')?.addEventListener('click', () => {
+        const missingAssets = this.store.getMissingVideoAssets?.() ?? [];
+        if (missingAssets[0]) {
+          this.triggerRelinkVideo(missingAssets[0].slideIds);
+        }
       });
 
       pane.querySelector('#btn-open-skins-from-insp')?.addEventListener('click', () => {
@@ -4002,7 +4550,12 @@ export class MotionPresentationApp {
     }
 
     this.inspectorSelectsScope.clear();
-    enhanceAppleSelects(pane, this.inspectorSelectsScope);
+    enhanceAppleSelects(pane, this.inspectorSelectsScope, this.layerStack);
+
+    const nextScrollEl = pane.querySelector('.inspector-scroll') as HTMLElement | null;
+    if (nextScrollEl && prevScrollTop > 0) {
+      nextScrollEl.scrollTop = prevScrollTop;
+    }
   }
 
   private renderToast(): void {
@@ -4481,40 +5034,26 @@ export class MotionPresentationApp {
         if (opened) {
           await this.store.loadOpenedDesktopProject(opened);
           this.currentProjectFilePath = null;
+          this.store.markProjectSaved();
           this.syncWindowTitle();
           this.store.notify(t('notify.demoReady'), 'success', 4500);
           return;
         }
       }
 
-      if (typeof fetch === 'function') {
-        try {
-          const res = await fetch('./demo/studio-showcase.mpres');
-          if (res.ok) {
-            const bytes = new Uint8Array(await res.arrayBuffer());
-            const parsed = ProjectSerializer.parseProjectBytes(bytes);
-            await this.store.loadProjectBundle(parsed);
-            this.currentProjectFilePath = null;
-            this.syncWindowTitle();
-            this.store.notify(t('notify.demoReady'), 'success', 4500);
-            return;
-          }
-        } catch {
-          // Fall back to procedural demo generator when bundled .mpres is unavailable
-        }
+      const response = await fetch('./demo/studio-showcase.mpres');
+      if (response.ok) {
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        const parsed = ProjectSerializer.parseProjectBytes(bytes);
+        this.currentProjectFilePath = null;
+        await this.store.loadProjectBundle(parsed);
+        this.store.markProjectSaved();
+        this.syncWindowTitle();
+        this.store.notify(t('notify.demoReady'), 'success', 4500);
+        return;
       }
 
-      const demoSlides = await DemoGenerator.generateDemoSlides((msg) => {
-        this.store.notify(msg, 'info', 2000);
-      });
-      this.currentProjectFilePath = null;
-      this.store.batchUpdate(() => {
-        this.store.clearAllSlides();
-        this.store.setProjectTitle(t('app.titleDemo'));
-        this.store.appendBatchSlides(demoSlides);
-      });
-      this.syncWindowTitle();
-      this.store.notify(t('notify.demoReady'), 'success', 4500);
+      this.store.notify(t('notify.demoFailed'), 'error');
     } catch (err) {
       this.store.notify(
         err instanceof Error ? err.message : t('notify.demoFailed'),
@@ -5126,62 +5665,77 @@ export class MotionPresentationApp {
     ++this.presentEpoch;
     this.isPresenterEnteringWindow = false;
 
-    if (this.isDedicatedPresenterOpen) {
-      const lastIdx = this.presenterConsoleStatus?.slideIndex ?? 0;
-      await window.desktopAPI?.closePresenterWindow?.();
-      await this.handleDedicatedPresenterClosed(lastIdx);
-      return;
-    }
-
-    const lastIdx = this.presenterEngine?.getStatus().currentSlideIndex ?? 0;
-
-    this.isPresentingFullscreen = false;
-    this.layerStack.setPresenting(false);
-    this.isSlideGridOpen = false;
-    this.isLaserPointerActive = false;
-    this.isPresenterNotesOpen = false;
-    this.clearSlideNumberBuffer();
-    if (this.presentationTimerHandle) {
-      clearInterval(this.presentationTimerHandle);
-      this.presentationTimerHandle = null;
-    }
-    if (this.onPresenterMouseMove) {
-      window.removeEventListener('mousemove', this.onPresenterMouseMove);
-      this.presenterOverlayEl?.removeEventListener('mousemove', this.onPresenterMouseMove);
-      this.onPresenterMouseMove = null;
-    }
-    this.laserPointerEl = null;
-    this.slideIndicatorEl = null;
-    if (this.presenterCursorTimer) {
-      clearTimeout(this.presenterCursorTimer);
-      this.presenterCursorTimer = null;
-    }
-
-    this.presenterEngine?.destroy();
-    this.presenterEngine = null;
-    this.presenterOverlayEl = null;
-
-    const fsRoot = this.root.querySelector('#fullscreen-root') as HTMLElement;
-    if (fsRoot) fsRoot.innerHTML = '';
-
     try {
-      if (window.desktopAPI?.setFullScreen) {
-        await window.desktopAPI.setFullScreen(false);
-      } else if (document.fullscreenElement) {
-        await document.exitFullscreen();
+      if (this.isDedicatedPresenterOpen) {
+        const lastIdx = this.presenterConsoleStatus?.slideIndex ?? 0;
+        try {
+          await window.desktopAPI?.closePresenterWindow?.();
+        } catch {
+          // The presenter window can already be gone (user closed it, monitor unplugged, IPC
+          // channel torn down). Leaving presentation mode must never depend on that call
+          // resolving, otherwise the studio is stuck presenting with autosave disabled.
+        }
+        await this.handleDedicatedPresenterClosed(lastIdx);
+        return;
       }
-    } catch {
-      // Ignore
-    }
 
-    this.store.setActivePreviewIndex(lastIdx);
-    const slide = this.store.getSlideByIndex(lastIdx);
-    if (slide) {
-      this.store.setSelection({ type: 'slide', slideId: slide.id });
+      const lastIdx = this.presenterEngine?.getStatus().currentSlideIndex ?? 0;
+
+      this.isPresentingFullscreen = false;
+      this.layerStack.setPresenting(false);
+      this.isSlideGridOpen = false;
+      this.isLaserPointerActive = false;
+      this.isPresenterNotesOpen = false;
+      this.clearSlideNumberBuffer();
+      if (this.presentationTimerHandle) {
+        clearInterval(this.presentationTimerHandle);
+        this.presentationTimerHandle = null;
+      }
+      if (this.onPresenterMouseMove) {
+        window.removeEventListener('mousemove', this.onPresenterMouseMove);
+        this.presenterOverlayEl?.removeEventListener('mousemove', this.onPresenterMouseMove);
+        this.onPresenterMouseMove = null;
+      }
+      this.laserPointerEl = null;
+      this.slideIndicatorEl = null;
+      if (this.presenterCursorTimer) {
+        clearTimeout(this.presenterCursorTimer);
+        this.presenterCursorTimer = null;
+      }
+
+      this.presenterEngine?.destroy();
+      this.presenterEngine = null;
+      this.presenterOverlayEl = null;
+
+      const fsRoot = this.root.querySelector('#fullscreen-root') as HTMLElement;
+      if (fsRoot) fsRoot.innerHTML = '';
+
+      try {
+        if (window.desktopAPI?.setFullScreen) {
+          await window.desktopAPI.setFullScreen(false);
+        } else if (document.fullscreenElement) {
+          await document.exitFullscreen();
+        }
+      } catch {
+        // Ignore
+      }
+
+      this.store.setActivePreviewIndex(lastIdx);
+      const slide = this.store.getSlideByIndex(lastIdx);
+      if (slide) {
+        this.store.setSelection({ type: 'slide', slideId: slide.id });
+      }
+      this.syncNavigatorActiveSlide(lastIdx);
+      this.renderToast();
+      await this.previewEngine.jumpToSlide(lastIdx, true);
+    } catch (err) {
+      // A failed transition back to the studio must be visible, not a silent stuck presenter.
+      this.reportUnexpectedError(err, 'error');
+    } finally {
+      // Runs even if the presenting state was already torn down above, so autosave always
+      // resumes after a show.
+      this.resumeAutosaveAfterPresentation();
     }
-    this.syncNavigatorActiveSlide(lastIdx);
-    this.renderToast();
-    await this.previewEngine.jumpToSlide(lastIdx, true);
   }
 
   private toggleLaserPointer(): void {
@@ -5347,7 +5901,16 @@ export class MotionPresentationApp {
 
   private bindGlobalShortcuts(): void {
     window.addEventListener('keydown', (e) => {
-      if (this.isModalOpen) {
+      if (
+        this.isModalOpen ||
+        this.layerStack.hasKind('modal') ||
+        this.layerStack.hasKind('command-palette')
+      ) {
+        return;
+      }
+
+      if (!this.isPresentingFullscreen && e.key === 'Escape' && this.layerStack.dismissTopmost()) {
+        e.preventDefault();
         return;
       }
 
@@ -6000,7 +6563,6 @@ export class MotionPresentationApp {
       return;
     }
 
-    const prevFocused = document.activeElement as HTMLElement | null;
     const summaryParts: string[] = [];
     if (slideIds.length > 0) summaryParts.push(this.formatArabicSlideCount(slideIds.length));
     if (transitionSlideIds.length > 0) {
@@ -6012,21 +6574,8 @@ export class MotionPresentationApp {
     }
     const summaryText = summaryParts.join(' · ');
 
-    let isClosed = false;
-    const cleanup = () => {
-      if (isClosed) return;
-      isClosed = true;
-      this.isModalOpen = false;
-      this.activeModalClose = null;
-      window.removeEventListener('keydown', onKeyDown);
-      host.innerHTML = '';
-      if (prevFocused && prevFocused.isConnected) {
-        prevFocused.focus();
-      }
-    };
-
     const executeBatch = (choice: 'above' | 'below' | 'bridge') => {
-      cleanup();
+      this.activeModalClose?.();
       const { deletedSlidesCount, deletedTransitionsCount } = this.store.deleteMultipleItems(
         slideIds,
         transitionSlideIds,
@@ -6035,81 +6584,96 @@ export class MotionPresentationApp {
       this.notifyBatchDeletion(deletedSlidesCount, deletedTransitionsCount);
     };
 
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        cleanup();
-      } else if (e.key === '1') {
-        e.preventDefault();
-        executeBatch('above');
-      } else if (e.key === '2') {
-        e.preventDefault();
-        executeBatch('below');
-      } else if (e.key === '3') {
-        e.preventDefault();
-        executeBatch('bridge');
-      }
-    };
-
-    this.isModalOpen = true;
-    this.activeModalClose = cleanup;
-    window.addEventListener('keydown', onKeyDown);
-
     host.innerHTML = `
-      <div class="reel-cue-modal-backdrop" id="delete-slide-modal-backdrop">
-        <div class="choice-modal" role="dialog" aria-modal="true" aria-label="${this.escapeHtml(t('delete.multiModalAria'))}">
-          <div class="reel-cue-modal-header">
-            <div class="reel-modal-header-lead">
+      <div class="modal-backdrop" id="delete-slide-modal-backdrop">
+        <div class="modal-card apple-sheet-modal is-compact" role="dialog" aria-modal="true" aria-label="${this.escapeHtml(t('delete.multiModalAria'))}">
+          <div class="modal-header">
+            <span class="modal-title">
               ${Icons.trash}
-              <span class="reel-modal-title">${t('delete.multiModalTitle', { summary: summaryText })}</span>
-            </div>
-            <button class="icon-btn" id="btn-delete-slide-close" aria-label="${this.escapeHtml(t('presenter.close'))}">${Icons.close}</button>
+              <span>${t('delete.multiModalTitle', { summary: summaryText })}</span>
+            </span>
+            <button type="button" class="btn btn-icon-only" id="btn-delete-slide-close" aria-label="${this.escapeHtml(t('presenter.close'))}">${Icons.close}</button>
           </div>
           <div class="choice-modal-body">
             <div class="prop-subtext" style="color:var(--label-secondary);">
               ${t('delete.multiPrompt')}
             </div>
-            <button class="choice-option-btn" id="btn-delete-trans-above" data-delete-choice="above">
+            <button type="button" class="choice-option-btn" id="btn-delete-trans-above" data-delete-choice="above">
               <span class="choice-option-icon">${Icons.chevronUp}</span>
               <span>
                 <span class="choice-option-title">${t('delete.aboveOptionTitle')}</span>
                 <span class="choice-option-desc">${t('delete.aboveOptionDesc')}</span>
               </span>
+              <kbd class="kbd-badge choice-option-kbd">1</kbd>
             </button>
-            <button class="choice-option-btn" id="btn-delete-trans-below" data-delete-choice="below">
+            <button type="button" class="choice-option-btn" id="btn-delete-trans-below" data-delete-choice="below">
               <span class="choice-option-icon">${Icons.chevronDown}</span>
               <span>
                 <span class="choice-option-title">${t('delete.belowOptionTitle')}</span>
                 <span class="choice-option-desc">${t('delete.belowOptionDesc')}</span>
               </span>
+              <kbd class="kbd-badge choice-option-kbd">2</kbd>
             </button>
-            <button class="choice-option-btn" id="btn-delete-trans-bridge" data-delete-choice="bridge">
+            <button type="button" class="choice-option-btn" id="btn-delete-trans-bridge" data-delete-choice="bridge">
               <span class="choice-option-icon">${Icons.filmTransition}</span>
               <span>
                 <span class="choice-option-title">${t('delete.mergeOptionTitle')}</span>
                 <span class="choice-option-desc">${t('delete.mergeOptionDesc')}</span>
               </span>
+              <kbd class="kbd-badge choice-option-kbd">3</kbd>
             </button>
-            <div style="display:flex; justify-content:flex-end; margin-top:4px;">
-              <button class="btn" id="btn-delete-slide-cancel">${t('inspector.cancel')}</button>
-            </div>
+          </div>
+          <div class="modal-footer reel-cue-modal-footer">
+            <button type="button" class="btn" id="btn-delete-slide-cancel">${t('inspector.cancel')}</button>
           </div>
         </div>
       </div>
     `;
 
-    host.querySelector('#btn-delete-slide-close')?.addEventListener('click', cleanup);
-    host.querySelector('#btn-delete-slide-cancel')?.addEventListener('click', cleanup);
-    host.querySelector('#delete-slide-modal-backdrop')?.addEventListener('click', (e) => {
-      if ((e.target as HTMLElement).id === 'delete-slide-modal-backdrop') {
-        cleanup();
+    const backdropEl = host.querySelector('#delete-slide-modal-backdrop') as HTMLElement;
+    const dialogEl = host.querySelector('.modal-card') as HTMLElement | null;
+    const closeDialog = attachModalDialogBehavior({
+      host,
+      scope: this.modalScope,
+      backdropEl,
+      dialogEl,
+      layerStack: this.layerStack,
+      layerId: 'choice-modal',
+      layerKind: 'modal',
+      initialFocusEl: host.querySelector('#btn-delete-trans-below') as HTMLElement | null,
+      onBeforeClose: () => {
+        if (this.activeModalClose === closeDialog) {
+          this.activeModalClose = null;
+        }
+      },
+      onAfterClose: () => {
+        this.refreshModalOpenState();
+      },
+    });
+
+    this.modalScope.listen(window, 'keydown', (e) => {
+      const ke = e as KeyboardEvent;
+      if (this.layerStack.getTopmost()?.id !== 'choice-modal') return;
+      if (ke.key === '1') {
+        ke.preventDefault();
+        executeBatch('above');
+      } else if (ke.key === '2') {
+        ke.preventDefault();
+        executeBatch('below');
+      } else if (ke.key === '3') {
+        ke.preventDefault();
+        executeBatch('bridge');
       }
     });
-    host.querySelector('#btn-delete-trans-above')?.addEventListener('click', () => executeBatch('above'));
-    host.querySelector('#btn-delete-trans-below')?.addEventListener('click', () => executeBatch('below'));
-    host.querySelector('#btn-delete-trans-bridge')?.addEventListener('click', () => executeBatch('bridge'));
 
-    (host.querySelector('#btn-delete-trans-below') as HTMLElement)?.focus();
+    this.modalScope.listen(host.querySelector('#btn-delete-slide-close'), 'click', closeDialog);
+    this.modalScope.listen(host.querySelector('#btn-delete-slide-cancel'), 'click', closeDialog);
+    this.modalScope.listen(host.querySelector('#btn-delete-trans-above'), 'click', () => executeBatch('above'));
+    this.modalScope.listen(host.querySelector('#btn-delete-trans-below'), 'click', () => executeBatch('below'));
+    this.modalScope.listen(host.querySelector('#btn-delete-trans-bridge'), 'click', () => executeBatch('bridge'));
+
+    this.activeModalClose = closeDialog;
+    this.refreshModalOpenState();
   }
 
   public promptDeleteSlide(slideId: string): void {
@@ -6130,7 +6694,6 @@ export class MotionPresentationApp {
       return;
     }
 
-    const prevFocused = document.activeElement as HTMLElement | null;
     const slide = slides[idx];
     const prevSlide = idx > 0 ? slides[idx - 1] : null;
     const aboveSpec = prevSlide ? prevSlide.transitionToNext : null;
@@ -6205,21 +6768,11 @@ export class MotionPresentationApp {
             to: idx + 1,
           });
 
-    let isClosed = false;
-    const cleanup = () => {
-      if (isClosed) return;
-      isClosed = true;
-      this.isModalOpen = false;
-      this.activeModalClose = null;
-      window.removeEventListener('keydown', onKeyDown);
-      host.innerHTML = '';
-      if (prevFocused && prevFocused.isConnected) {
-        prevFocused.focus();
-      }
-    };
+    const isEdgeSlide = idx === 0 || idx === slides.length - 1;
+    const edgeChoice: 'above' | 'below' = idx === 0 ? 'below' : 'above';
 
     const executeChoice = (choice: 'above' | 'below' | 'bridge') => {
-      cleanup();
+      this.activeModalClose?.();
       this.store.deleteSlide(slideId, choice);
       if (choice === 'above') {
         this.store.notify(t('notify.slideDeletedAbove', { num: idx + 1 }), 'info', 2500);
@@ -6230,58 +6783,43 @@ export class MotionPresentationApp {
       }
     };
 
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        cleanup();
-      } else if (e.key === '1') {
-        e.preventDefault();
-        executeChoice('above');
-      } else if (e.key === '2') {
-        e.preventDefault();
-        executeChoice('below');
-      } else if (e.key === '3' && canBridgeContiguousReel) {
-        e.preventDefault();
-        executeChoice('bridge');
-      }
-    };
-
-    this.isModalOpen = true;
-    this.activeModalClose = cleanup;
-    window.addEventListener('keydown', onKeyDown);
-
-    host.innerHTML = `
-      <div class="reel-cue-modal-backdrop" id="delete-slide-modal-backdrop">
-        <div class="choice-modal" role="dialog" aria-modal="true" aria-label="${this.escapeHtml(t('delete.singleModalAria'))}">
-          <div class="reel-cue-modal-header">
-            <div class="reel-modal-header-lead">
-              ${Icons.trash}
-              <span class="reel-modal-title">${t('delete.singleModalTitle', { num: idx + 1, title: this.escapeHtml(slide.title) })}</span>
+    const bodyHtml = isEdgeSlide
+      ? `
+          <div class="choice-modal-body">
+            <div class="choice-delete-banner">
+              ${t('delete.edgePrompt', { num: idx + 1, title: this.escapeHtml(slide.title) })}
             </div>
-            <button class="icon-btn" id="btn-delete-slide-close" aria-label="${this.escapeHtml(t('presenter.close'))}">${Icons.close}</button>
           </div>
+          <div class="modal-footer reel-cue-modal-footer">
+            <button type="button" class="btn" id="btn-delete-slide-cancel">${t('inspector.cancel')}</button>
+            <button type="button" class="btn btn-destructive" id="btn-confirm-delete-slide">${t('delete.confirmBtn')}</button>
+          </div>
+        `
+      : `
           <div class="choice-modal-body">
             <div class="prop-subtext" style="color:var(--label-secondary);">
               ${t('delete.singlePrompt')}
             </div>
-            <button class="choice-option-btn" id="btn-delete-trans-above" data-delete-choice="above">
+            <button type="button" class="choice-option-btn" id="btn-delete-trans-above" data-delete-choice="above">
               <span class="choice-option-icon">${Icons.chevronUp}</span>
               <span>
                 <span class="choice-option-title">${t('delete.singleAboveTitle')}</span>
                 <span class="choice-option-desc">${aboveDesc}</span>
               </span>
+              <kbd class="kbd-badge choice-option-kbd">1</kbd>
             </button>
-            <button class="choice-option-btn" id="btn-delete-trans-below" data-delete-choice="below">
+            <button type="button" class="choice-option-btn" id="btn-delete-trans-below" data-delete-choice="below">
               <span class="choice-option-icon">${Icons.chevronDown}</span>
               <span>
                 <span class="choice-option-title">${t('delete.singleBelowTitle')}</span>
                 <span class="choice-option-desc">${belowDesc}</span>
               </span>
+              <kbd class="kbd-badge choice-option-kbd">2</kbd>
             </button>
             ${
               canBridgeContiguousReel
                 ? `
-              <button class="choice-option-btn" id="btn-delete-trans-bridge" data-delete-choice="bridge">
+              <button type="button" class="choice-option-btn" id="btn-delete-trans-bridge" data-delete-choice="bridge">
                 <span class="choice-option-icon">${Icons.filmTransition}</span>
                 <span>
                   <span class="choice-option-title">${t('delete.singleMergeTitle')}</span>
@@ -6291,37 +6829,89 @@ export class MotionPresentationApp {
                     end: (belowSpec.endTimeSec ?? 0).toFixed(1),
                   })}</span>
                 </span>
+                <kbd class="kbd-badge choice-option-kbd">3</kbd>
               </button>
             `
                 : ''
             }
-            <div style="display:flex; justify-content:flex-end; margin-top:4px;">
-              <button class="btn" id="btn-delete-slide-cancel">${t('inspector.cancel')}</button>
-            </div>
           </div>
+          <div class="modal-footer reel-cue-modal-footer">
+            <button type="button" class="btn" id="btn-delete-slide-cancel">${t('inspector.cancel')}</button>
+          </div>
+        `;
+
+    host.innerHTML = `
+      <div class="modal-backdrop" id="delete-slide-modal-backdrop">
+        <div class="modal-card apple-sheet-modal is-compact" role="dialog" aria-modal="true" aria-label="${this.escapeHtml(t('delete.singleModalAria'))}">
+          <div class="modal-header">
+            <span class="modal-title">
+              ${Icons.trash}
+              <span>${t('delete.singleModalTitle', { num: idx + 1, title: this.escapeHtml(slide.title) })}</span>
+            </span>
+            <button type="button" class="btn btn-icon-only" id="btn-delete-slide-close" aria-label="${this.escapeHtml(t('presenter.close'))}">${Icons.close}</button>
+          </div>
+          ${bodyHtml}
         </div>
       </div>
     `;
 
-    host.querySelector('#btn-delete-slide-close')?.addEventListener('click', cleanup);
-    host.querySelector('#btn-delete-slide-cancel')?.addEventListener('click', cleanup);
-    host.querySelector('#delete-slide-modal-backdrop')?.addEventListener('click', (e) => {
-      if ((e.target as HTMLElement).id === 'delete-slide-modal-backdrop') {
-        cleanup();
-      }
+    const backdropEl = host.querySelector('#delete-slide-modal-backdrop') as HTMLElement;
+    const dialogEl = host.querySelector('.modal-card') as HTMLElement | null;
+    const closeDialog = attachModalDialogBehavior({
+      host,
+      scope: this.modalScope,
+      backdropEl,
+      dialogEl,
+      layerStack: this.layerStack,
+      layerId: 'choice-modal',
+      layerKind: 'modal',
+      initialFocusEl: (isEdgeSlide
+        ? host.querySelector('#btn-delete-slide-cancel')
+        : host.querySelector('#btn-delete-trans-below')) as HTMLElement | null,
+      onBeforeClose: () => {
+        if (this.activeModalClose === closeDialog) {
+          this.activeModalClose = null;
+        }
+      },
+      onAfterClose: () => {
+        this.refreshModalOpenState();
+      },
     });
 
-    host.querySelector('#btn-delete-trans-above')?.addEventListener('click', () => {
+    if (!isEdgeSlide) {
+      this.modalScope.listen(window, 'keydown', (e) => {
+        const ke = e as KeyboardEvent;
+        if (this.layerStack.getTopmost()?.id !== 'choice-modal') return;
+        if (ke.key === '1') {
+          ke.preventDefault();
+          executeChoice('above');
+        } else if (ke.key === '2') {
+          ke.preventDefault();
+          executeChoice('below');
+        } else if (ke.key === '3' && canBridgeContiguousReel) {
+          ke.preventDefault();
+          executeChoice('bridge');
+        }
+      });
+    }
+
+    this.modalScope.listen(host.querySelector('#btn-delete-slide-close'), 'click', closeDialog);
+    this.modalScope.listen(host.querySelector('#btn-delete-slide-cancel'), 'click', closeDialog);
+    this.modalScope.listen(host.querySelector('#btn-confirm-delete-slide'), 'click', () => {
+      executeChoice(edgeChoice);
+    });
+    this.modalScope.listen(host.querySelector('#btn-delete-trans-above'), 'click', () => {
       executeChoice('above');
     });
-    host.querySelector('#btn-delete-trans-below')?.addEventListener('click', () => {
+    this.modalScope.listen(host.querySelector('#btn-delete-trans-below'), 'click', () => {
       executeChoice('below');
     });
-    host.querySelector('#btn-delete-trans-bridge')?.addEventListener('click', () => {
+    this.modalScope.listen(host.querySelector('#btn-delete-trans-bridge'), 'click', () => {
       executeChoice('bridge');
     });
 
-    (host.querySelector('#btn-delete-trans-below') as HTMLElement)?.focus();
+    this.activeModalClose = closeDialog;
+    this.refreshModalOpenState();
   }
 
   private openSingleVideoActionModal(videoAsset: MediaAsset): void {
@@ -6329,7 +6919,6 @@ export class MotionPresentationApp {
     const host = this.root.querySelector('#choice-modal-host') as HTMLElement;
     if (!host) return;
 
-    const prevFocused = document.activeElement as HTMLElement | null;
     const slides = this.store.getSlides();
     const selection = this.store.getSelection();
     const targetSlide =
@@ -6338,62 +6927,34 @@ export class MotionPresentationApp {
         : slides[this.store.getActivePreviewIndex()];
     const targetIdx = targetSlide ? slides.findIndex((s) => s.id === targetSlide.id) : 0;
 
-    let isClosed = false;
     let handedOffToStoreOrModal = false;
-
-    const cleanup = () => {
-      if (isClosed) return;
-      isClosed = true;
-      this.isModalOpen = false;
-      this.activeModalClose = null;
-      window.removeEventListener('keydown', onKeyDown);
-      host.innerHTML = '';
-      if (!handedOffToStoreOrModal) {
-        MediaValidator.revokeAssetUrls(videoAsset);
-      }
-      if (prevFocused && prevFocused.isConnected) {
-        prevFocused.focus();
-      }
-    };
-
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        cleanup();
-      }
-    };
-
-    this.isModalOpen = true;
-    this.activeModalClose = cleanup;
-    window.addEventListener('keydown', onKeyDown);
-
     const ratio =
       videoAsset.suggestedAspectRatio ??
       MediaValidator.inferAspectRatio(videoAsset.width || 1920, videoAsset.height || 1080);
 
     host.innerHTML = `
-      <div class="reel-cue-modal-backdrop" id="choice-modal-backdrop">
-        <div class="choice-modal" role="dialog" aria-modal="true" aria-label="${this.escapeHtml(t('videoChoice.aria'))}">
-          <div class="reel-cue-modal-header">
-            <div class="reel-modal-header-lead">
+      <div class="modal-backdrop" id="choice-modal-backdrop">
+        <div class="modal-card apple-sheet-modal is-compact" role="dialog" aria-modal="true" aria-label="${this.escapeHtml(t('videoChoice.aria'))}">
+          <div class="modal-header">
+            <span class="modal-title">
               ${Icons.filmTransition}
-              <span class="reel-modal-title">${t('videoChoice.title')}</span>
-            </div>
-            <button class="icon-btn" id="btn-choice-close" aria-label="${this.escapeHtml(t('presenter.close'))}">${Icons.close}</button>
+              <span>${t('videoChoice.title')}</span>
+            </span>
+            <button type="button" class="btn btn-icon-only" id="btn-choice-close" aria-label="${this.escapeHtml(t('presenter.close'))}">${Icons.close}</button>
           </div>
           <div class="choice-modal-body">
             <div class="prop-subtext">
               ${t('videoChoice.fileLabel')} <strong style="color:var(--label-primary);">${this.escapeHtml(videoAsset.name)}</strong>
               (${videoAsset.durationSec.toFixed(1)}s · ${videoAsset.width}×${videoAsset.height})
             </div>
-            <button class="choice-option-btn" id="btn-choice-append-reel">
+            <button type="button" class="choice-option-btn" id="btn-choice-append-reel">
               <span class="choice-option-icon">${Icons.plus}</span>
               <span>
                 <span class="choice-option-title">${t('videoChoice.splitAppendTitle')}</span>
                 <span class="choice-option-desc">${t('videoChoice.splitAppendDesc')}</span>
               </span>
             </button>
-            <button class="choice-option-btn" id="btn-choice-replace-reel">
+            <button type="button" class="choice-option-btn" id="btn-choice-replace-reel">
               <span class="choice-option-icon">${Icons.filmTransition}</span>
               <span>
                 <span class="choice-option-title">${t('videoChoice.replaceAllTitle')}</span>
@@ -6403,7 +6964,7 @@ export class MotionPresentationApp {
             ${
               targetSlide
                 ? `
-              <button class="choice-option-btn" id="btn-choice-attach-transition">
+              <button type="button" class="choice-option-btn" id="btn-choice-attach-transition">
                 <span class="choice-option-icon">${Icons.relink}</span>
                 <span>
                   <span class="choice-option-title">${t('videoChoice.attachTargetTitle', { num: targetIdx + 1 })}</span>
@@ -6418,34 +6979,54 @@ export class MotionPresentationApp {
       </div>
     `;
 
-    host.querySelector('#btn-choice-close')?.addEventListener('click', cleanup);
-    host.querySelector('#choice-modal-backdrop')?.addEventListener('click', (e) => {
-      if ((e.target as HTMLElement).id === 'choice-modal-backdrop') {
-        cleanup();
-      }
+    const backdropEl = host.querySelector('#choice-modal-backdrop') as HTMLElement;
+    const dialogEl = host.querySelector('.modal-card') as HTMLElement | null;
+    const closeDialog = attachModalDialogBehavior({
+      host,
+      scope: this.modalScope,
+      backdropEl,
+      dialogEl,
+      layerStack: this.layerStack,
+      layerId: 'choice-modal',
+      layerKind: 'modal',
+      initialFocusEl: host.querySelector('#btn-choice-append-reel') as HTMLElement | null,
+      onBeforeClose: () => {
+        if (this.activeModalClose === closeDialog) {
+          this.activeModalClose = null;
+        }
+      },
+      onAfterClose: () => {
+        if (!handedOffToStoreOrModal) {
+          MediaValidator.revokeAssetUrls(videoAsset);
+        }
+        this.refreshModalOpenState();
+      },
     });
 
-    host.querySelector('#btn-choice-append-reel')?.addEventListener('click', () => {
+    this.modalScope.listen(host.querySelector('#btn-choice-close'), 'click', closeDialog);
+
+    this.modalScope.listen(host.querySelector('#btn-choice-append-reel'), 'click', () => {
       handedOffToStoreOrModal = true;
-      cleanup();
+      closeDialog();
       this.openReelCueModal(videoAsset, { mode: 'append' });
     });
 
-    host.querySelector('#btn-choice-replace-reel')?.addEventListener('click', () => {
+    this.modalScope.listen(host.querySelector('#btn-choice-replace-reel'), 'click', () => {
       handedOffToStoreOrModal = true;
-      cleanup();
+      closeDialog();
       this.openReelCueModal(videoAsset, { mode: 'replace-all' });
     });
 
-    host.querySelector('#btn-choice-attach-transition')?.addEventListener('click', () => {
+    this.modalScope.listen(host.querySelector('#btn-choice-attach-transition'), 'click', () => {
       if (!targetSlide) return;
       handedOffToStoreOrModal = true;
       this.store.setSlideTransitionVideo(targetSlide.id, videoAsset);
       this.store.notify(t('notify.videoAttachedAfterSlide', { num: targetIdx + 1 }), 'success');
-      cleanup();
+      closeDialog();
     });
 
-    (host.querySelector('#btn-choice-append-reel') as HTMLElement)?.focus();
+    this.activeModalClose = closeDialog;
+    this.refreshModalOpenState();
   }
 
   private openReelCueModal(
@@ -6701,7 +7282,7 @@ export class MotionPresentationApp {
 
             <div class="reel-actions-bar">
               <div class="reel-actions-group">
-                <button class="btn btn-prominent" id="btn-reel-add-current" type="button">
+                <button class="btn" id="btn-reel-add-current" type="button">
                   ${Icons.cuePin}
                   <span>${t('reel.addCueBtn')}</span>
                 </button>
@@ -6785,7 +7366,11 @@ export class MotionPresentationApp {
     const autoDetectBtn = host.querySelector('#btn-reel-auto-detect') as HTMLButtonElement;
     const sensitivitySel = host.querySelector('#reel-detect-sensitivity') as HTMLSelectElement;
     this.reelSelectsScope.clear();
-    enhanceAppleSelects(host.querySelector('.reel-actions-bar') as HTMLElement | null, this.reelSelectsScope);
+    enhanceAppleSelects(
+      host.querySelector('.reel-actions-bar') as HTMLElement | null,
+      this.reelSelectsScope,
+      this.layerStack
+    );
     const reelCardsSelectsScope = this.reelSelectsScope.createChildScope();
     const matchRatioChk = host.querySelector('#chk-reel-match-ratio') as HTMLInputElement | null;
     const applyBtn = host.querySelector('#btn-reel-apply') as HTMLButtonElement;
@@ -7583,7 +8168,7 @@ export class MotionPresentationApp {
       });
 
       reelCardsSelectsScope.clear();
-      enhanceAppleSelects(cuesListEl, reelCardsSelectsScope);
+      enhanceAppleSelects(cuesListEl, reelCardsSelectsScope, this.layerStack);
     };
 
     const renderAllCueUi = () => {
@@ -7619,8 +8204,9 @@ export class MotionPresentationApp {
       if (isClosed) return;
       if (isApplying && !forceCancel) return;
       isClosed = true;
-      this.isModalOpen = false;
+      this.layerStack.remove('reel-cue-modal');
       this.activeModalClose = null;
+      this.refreshModalOpenState();
       this.reelSelectsScope.clear();
       stopPlaybackRaf();
       window.removeEventListener('keydown', onModalKeyDown, true);
@@ -7662,6 +8248,10 @@ export class MotionPresentationApp {
         (target.tagName === 'INPUT' || target.tagName === 'SELECT' || target.tagName === 'TEXTAREA');
 
       if (e.key === 'Escape') {
+        const topmost = this.layerStack.getTopmost();
+        if (topmost && topmost.id !== 'reel-cue-modal') {
+          return;
+        }
         e.preventDefault();
         e.stopPropagation();
         if (isApplying) {
@@ -7723,9 +8313,15 @@ export class MotionPresentationApp {
       }
     };
 
-    this.isModalOpen = true;
+    this.layerStack.push({
+      id: 'reel-cue-modal',
+      kind: 'modal',
+      close: () => closeModal(true),
+    });
     this.activeModalClose = () => closeModal(true);
+    this.refreshModalOpenState();
     window.addEventListener('keydown', onModalKeyDown, true);
+    playPauseBtn?.focus();
 
     // Wire video element events
     videoEl?.addEventListener('loadedmetadata', () => {
@@ -8089,10 +8685,7 @@ export class MotionPresentationApp {
     });
   }
 
-  private renderStudioTimelineDock(): void {
-    const dock = this.root.querySelector('#studio-timeline-dock') as HTMLElement | null;
-    const slides = this.store.getSlides();
-
+  private computeTotalTransitionSec(slides: SlideNode[]): number {
     let totalTransitionSec = 0;
     for (let i = 0; i < slides.length - 1; i++) {
       const spec = slides[i].transitionToNext;
@@ -8102,17 +8695,39 @@ export class MotionPresentationApp {
           typeof spec.endTimeSec === 'number' &&
           spec.endTimeSec > spec.startTimeSec
         ) {
-          totalTransitionSec += spec.endTimeSec - spec.startTimeSec;
+          totalTransitionSec += (spec.endTimeSec - spec.startTimeSec) / Math.max(0.25, spec.playbackSpeed || 1);
         } else {
-          totalTransitionSec +=
+          const baseDur =
             spec.videoAsset.durationSec > 0
               ? spec.videoAsset.durationSec
               : (spec.fallbackDurationMs || 650) / 1000;
+          totalTransitionSec += baseDur / Math.max(0.25, spec.playbackSpeed || 1);
         }
       } else {
         totalTransitionSec += (spec.fallbackDurationMs || 650) / 1000;
       }
     }
+    return totalTransitionSec;
+  }
+
+  private updateStudioTimelineDockMetadata(): void {
+    const dock = this.root.querySelector('#studio-timeline-dock') as HTMLElement | null;
+    const slides = this.store.getSlides();
+    if (slides.length === 0) {
+      this.renderStudioTimelineDock();
+      return;
+    }
+    const formattedTotalDuration = this.formatTimecode(this.computeTotalTransitionSec(slides));
+    const updated = updateTimelineDockMetadataView(dock, slides, formattedTotalDuration);
+    if (!updated) {
+      this.renderStudioTimelineDock();
+    }
+  }
+
+  private renderStudioTimelineDock(): void {
+    const dock = this.root.querySelector('#studio-timeline-dock') as HTMLElement | null;
+    const slides = this.store.getSlides();
+    const totalTransitionSec = this.computeTotalTransitionSec(slides);
 
     const selection = this.store.getSelection();
     const activeSlideId =
@@ -8198,6 +8813,8 @@ export class MotionPresentationApp {
         slideIndex: idx,
         totalSlides: slides.length,
         hasReelContext: Boolean(this.store.getReelContextForSlide?.(slideId)),
+        sequenceLayout: this.isNavigatorVisible ? 'side' : 'bottom',
+        layerStack: this.layerStack,
         clientX,
         clientY,
       },
@@ -8432,7 +9049,6 @@ export class MotionPresentationApp {
       this.commandPaletteActiveIdx = 0;
     }
 
-    this.isModalOpen = true;
     this.isCommandPaletteOpen = true;
     this.activeModalClose = openCommandPaletteModal({
       host,
@@ -8440,16 +9056,18 @@ export class MotionPresentationApp {
       items: this.getStudioCommandItems(),
       initialQuery: this.commandPaletteQuery,
       initialActiveIdx: this.commandPaletteActiveIdx,
+      layerStack: this.layerStack,
       onStateChange: (query, activeIdx) => {
         this.commandPaletteQuery = query;
         this.commandPaletteActiveIdx = activeIdx;
       },
       onBeforeClose: () => {
-        this.isModalOpen = false;
         this.isCommandPaletteOpen = false;
         this.activeModalClose = null;
+        this.refreshModalOpenState();
       },
     });
+    this.refreshModalOpenState();
   }
 
   public async openAboutModal(): Promise<void> {
@@ -8468,11 +9086,17 @@ export class MotionPresentationApp {
       // Fallback to compile-time version when desktopAPI is absent
     }
 
-    this.isModalOpen = true;
-    this.activeModalClose = openAboutModalView(host, this.modalScope, version, () => {
-      this.isModalOpen = false;
-      this.activeModalClose = null;
-    });
+    this.activeModalClose = openAboutModalView(
+      host,
+      this.modalScope,
+      version,
+      () => {
+        this.activeModalClose = null;
+        this.refreshModalOpenState();
+      },
+      this.layerStack
+    );
+    this.refreshModalOpenState();
   }
 
   public openShortcutsHelpModal(): void {
@@ -8481,18 +9105,16 @@ export class MotionPresentationApp {
       this.root.querySelector('#choice-modal-host')) as HTMLElement | null;
     if (!host) return;
 
-    this.isModalOpen = true;
-    this.activeModalClose = openShortcutsHelpModalView(host, this.modalScope, () => {
-      this.isModalOpen = false;
-      this.activeModalClose = null;
-    });
-  }
-
-  public closeShortcutsHelpModal(): void {
-    const backdrop = this.root.querySelector('#shortcuts-modal-backdrop');
-    if (backdrop) {
-      this.activeModalClose?.();
-    }
+    this.activeModalClose = openShortcutsHelpModalView(
+      host,
+      this.modalScope,
+      () => {
+        this.activeModalClose = null;
+        this.refreshModalOpenState();
+      },
+      this.layerStack
+    );
+    this.refreshModalOpenState();
   }
 
   private escapeHtml(str: string): string {

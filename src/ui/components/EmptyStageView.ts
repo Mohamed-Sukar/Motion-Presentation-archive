@@ -59,10 +59,6 @@ export function renderEmptyStageView(
               <span class="welcome-brand-sub">PRESENTATION STUDIO</span>
             </div>
           </div>
-          <span class="welcome-hero-badge">
-            ${Icons.sparkles}
-            <span>${escapeHtml(t('welcome.badge'))}</span>
-          </span>
           <h2 class="welcome-hero-heading">${escapeHtml(t('welcome.heading'))}</h2>
           <p class="welcome-hero-copy">${escapeHtml(t('welcome.subtitle'))}</p>
         </div>
@@ -129,7 +125,8 @@ export function renderEmptyStageView(
             type="button"
             class="btn btn-icon-only btn-xs"
             id="btn-recent-menu"
-            aria-label="${escapeHtml(t('toolbar.moreActions'))}"
+            title="${escapeHtml(t('welcome.recentMoreActions'))}"
+            aria-label="${escapeHtml(t('welcome.recentMoreActions'))}"
             aria-haspopup="menu"
             aria-expanded="false"
           >

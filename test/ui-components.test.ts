@@ -473,24 +473,20 @@ export async function runUiComponentsTests(): Promise<{ passed: number; failed: 
       (appRoot.querySelector('#btn-close-stage-popover') as any)?.click();
       assert.equal(appRoot.querySelector('#stage-settings-card'), null, 'Stage popover closes cleanly');
 
-      // 3. Slim Inspector specialized modals (Idle Loop, Surgical AI, Engine Prefs, Deck Diagnostics)
-      (appRoot.querySelector('#btn-open-idle-loop-modal') as any)?.click();
-      assert.ok(appRoot.querySelector('#workspace-modal-backdrop'), 'Slide tab opens Idle Loop modal');
-      (appRoot.querySelector('#btn-close-workspace-modal') as any)?.click();
-      assert.equal(appRoot.querySelector('#workspace-modal-backdrop'), null);
+      // 3. Inline Inspector (Idle Loop, Deck Diagnostics) & Specialized Modals (Surgical AI, Engine Prefs)
+      assert.ok(appRoot.querySelector('#insp-idle-loop-card'), 'Slide tab renders inline Idle Loop card');
+      assert.ok(appRoot.querySelector('#btn-insp-assign-idle'), 'Slide tab offers inline Assign Idle Loop button');
 
       (appRoot.querySelector('#btn-open-ai-edit-modal') as any)?.click();
       assert.ok(appRoot.querySelector('#surgical-ai-modal-body'), 'Opens Surgical AI modal');
       (appRoot.querySelector('#btn-close-workspace-modal') as any)?.click();
 
       store.setSelection({ type: 'settings' });
+      assert.ok(appRoot.querySelector('#insp-deck-diagnostics-group .diagnostics-grid'), 'Settings tab renders inline Deck Diagnostics grid');
       (appRoot.querySelector('#btn-open-engine-prefs-modal') as any)?.click();
       assert.ok(appRoot.querySelector('#mod-interrupt-behavior'), 'Settings tab opens Engine Preferences modal');
       (appRoot.querySelector('#btn-close-workspace-modal') as any)?.click();
-
-      (appRoot.querySelector('#btn-open-deck-stats-modal') as any)?.click();
-      assert.ok(appRoot.querySelector('#workspace-modal-backdrop .diagnostics-grid'), 'Opens Deck Diagnostics modal');
-      (appRoot.querySelector('#btn-done-workspace-modal') as any)?.click();
+      assert.equal(appRoot.querySelector('#workspace-modal-backdrop'), null);
 
       // 4. Responsive Stage-First Overlay Drawer on narrow split window
       const splitView = appRoot.querySelector('.split-view') as any;
@@ -511,6 +507,95 @@ export async function runUiComponentsTests(): Promise<{ passed: number; failed: 
         ComponentScope.getGlobalActiveListenerCount() <= baselineListeners,
         'Disposing app must leave zero leaked listeners'
       );
+    } finally {
+      app?.dispose();
+      resetThemeStateForTesting();
+      env.teardown();
+    }
+  });
+
+  await test('UI-06', 'Timeline dock scrollLeft and DOM nodes survive metadata/settings edits & structural re-renders', () => {
+    const env = setupMockDOM();
+    let app: MotionPresentationApp | null = null;
+    try {
+      const appRoot = env.document.createElement('div');
+      app = new MotionPresentationApp(appRoot as any);
+      const store = (app as any).store;
+
+      const addedSlides: any[] = [];
+      for (let i = 1; i <= 14; i++) {
+        addedSlides.push(store.addSlideFromImage(makeMockImageAsset(`s_${i}`, `slide_${i}.png`)));
+      }
+
+      const slide12 = addedSlides[11];
+      const slide13 = addedSlides[12];
+      store.setSelection({ type: 'slide', slideId: slide12.id });
+
+      const dock = appRoot.querySelector('#studio-timeline-dock') as HTMLElement;
+      const trackBefore = dock.querySelector('.dock-sequence-track') as HTMLElement;
+      assert.ok(trackBefore, 'Timeline track must exist');
+      trackBefore.scrollLeft = 1420;
+
+      const slide13BtnBefore = dock.querySelector(`[data-dock-slide-id="${slide13.id}"]`) as HTMLElement;
+      const dupBtnBefore = appRoot.querySelector('#btn-insp-duplicate-slide') as HTMLElement;
+      const titleInput = appRoot.querySelector('#insp-slide-title') as any;
+      const holdInput = appRoot.querySelector('#insp-slide-hold') as any;
+      assert.ok(slide13BtnBefore && dupBtnBefore && titleInput && holdInput);
+
+      // Simulate blur->change on Slide 12 title and hold duration
+      titleInput.value = 'Slide 12 Edited';
+      titleInput.dispatchEvent(new MockMouseEvent('change'));
+      holdInput.value = '4.5';
+      holdInput.dispatchEvent(new MockMouseEvent('change'));
+
+      const trackAfterMeta = dock.querySelector('.dock-sequence-track') as HTMLElement;
+      const slide13BtnAfter = dock.querySelector(`[data-dock-slide-id="${slide13.id}"]`) as HTMLElement;
+      const dupBtnAfter = appRoot.querySelector('#btn-insp-duplicate-slide') as HTMLElement;
+      const slide12Btn = dock.querySelector(`[data-dock-slide-id="${slide12.id}"]`) as HTMLElement;
+
+      assert.equal(trackAfterMeta, trackBefore, 'Metadata edit must not destroy timeline track');
+      assert.equal(trackAfterMeta.scrollLeft, 1420, 'Timeline scrollLeft must stay at 1420 after metadata edit');
+      assert.equal(slide13BtnAfter, slide13BtnBefore, 'Timeline slide buttons must stay intact so click fires');
+      assert.equal(dupBtnAfter, dupBtnBefore, 'Inspector buttons must stay intact so click fires');
+      assert.equal(
+        slide12Btn.querySelector('.dock-seq-label')?.textContent,
+        'Slide 12 Edited',
+        'Timeline slide label must update in place'
+      );
+      assert.equal(
+        slide12Btn.querySelector('.dock-seq-hold')?.textContent,
+        '4.5s',
+        'Timeline hold badge must update in place'
+      );
+      assert.equal(
+        appRoot.querySelector('#lbl-slide-hold')?.textContent,
+        '4.5s',
+        'Inspector hold readout must update in place'
+      );
+
+      // Clicking slide 13 right after metadata change must work immediately
+      slide13BtnAfter.click();
+      assert.equal(store.getSelection().slideId, slide13.id, 'First click on timeline after edit must select slide 13');
+
+      // Structural re-render (e.g. replaceSlideImage) must also preserve timeline scrollLeft
+      const trackBeforeStruct = dock.querySelector('.dock-sequence-track') as HTMLElement;
+      trackBeforeStruct.scrollLeft = 1350;
+      store.replaceSlideImage(slide13.id, makeMockImageAsset('s_13_new', 'slide_13_v2.png'));
+
+      const trackAfterStruct = dock.querySelector('.dock-sequence-track') as HTMLElement;
+      assert.equal(trackAfterStruct.scrollLeft, 1350, 'Structural re-render must preserve timeline scrollLeft');
+
+      // Settings tab in-place sync must preserve DOM nodes on settings change
+      store.setSelection({ type: 'settings' });
+      const loopCheckBefore = appRoot.querySelector('#set-loop') as HTMLInputElement;
+      const bgTextBefore = appRoot.querySelector('#set-stage-bg-text') as any;
+      bgTextBefore.value = '#112233';
+      bgTextBefore.dispatchEvent(new MockMouseEvent('change'));
+      const loopCheckAfter = appRoot.querySelector('#set-loop') as HTMLInputElement;
+      assert.equal(loopCheckAfter, loopCheckBefore, 'Settings edit must update inspector in place without wiping DOM');
+
+      app.dispose();
+      app = null;
     } finally {
       app?.dispose();
       resetThemeStateForTesting();

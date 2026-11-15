@@ -1,3 +1,4 @@
+import './ui/styles/fonts.css';
 import './ui/styles/main.css';
 import './ui/styles/studio-theme.css';
 import { MotionPresentationApp } from './ui/App';

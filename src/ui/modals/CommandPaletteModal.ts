@@ -1,5 +1,7 @@
 import { t } from '../../core/i18n';
 import { ComponentScope, escapeHtml } from '../core/ComponentLifecycle';
+import type { LayerStack } from '../core/LayerStack';
+import { attachModalDialogBehavior } from '../core/ModalDialog';
 import { Icons } from '../icons';
 
 export interface StudioCommandItem {
@@ -20,18 +22,15 @@ export interface CommandPaletteOpenProps {
   initialActiveIdx: number;
   onStateChange: (query: string, activeIdx: number) => void;
   onBeforeClose: () => void;
+  layerStack?: LayerStack;
 }
 
 export function openCommandPaletteModal(props: CommandPaletteOpenProps): () => void {
-  const { host, scope, items: allItems, onStateChange, onBeforeClose } = props;
+  const { host, scope, items: allItems, onStateChange, onBeforeClose, layerStack } = props;
 
   scope.clear();
   let query = props.initialQuery;
   let activeIdx = props.initialActiveIdx;
-  let isClosed = false;
-  const prevFocused =
-    typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
-
   const listScope = scope.createChildScope();
 
   const getFilteredItems = () => {
@@ -45,16 +44,42 @@ export function openCommandPaletteModal(props: CommandPaletteOpenProps): () => v
     );
   };
 
-  const cleanup = () => {
-    if (isClosed) return;
-    isClosed = true;
-    onBeforeClose();
-    scope.clear();
-    host.innerHTML = '';
-    if (prevFocused && (prevFocused as any).isConnected) {
-      prevFocused.focus?.();
-    }
-  };
+  host.innerHTML = `
+    <div class="command-palette-backdrop" id="command-palette-backdrop">
+      <div class="command-palette-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(t('toolbar.commandPaletteTitle'))}">
+        <div class="command-palette-search">
+          ${Icons.search}
+          <input
+            type="text"
+            class="command-palette-input"
+            id="command-palette-input"
+            value="${escapeHtml(query)}"
+            placeholder="${escapeHtml(t('cmd.placeholder'))}"
+            autocomplete="off"
+          />
+          <kbd class="kbd-badge">Esc</kbd>
+        </div>
+        <div class="command-palette-list" id="command-palette-list"></div>
+      </div>
+    </div>
+  `;
+
+  const backdrop = host.querySelector('#command-palette-backdrop') as HTMLElement;
+  const dialog = host.querySelector('.command-palette-modal') as HTMLElement | null;
+  const searchInput = host.querySelector('#command-palette-input') as HTMLInputElement | null;
+
+  const cleanup = attachModalDialogBehavior({
+    host,
+    scope,
+    backdropEl: backdrop,
+    dialogEl: dialog,
+    layerStack,
+    layerId: 'command-palette',
+    layerKind: 'command-palette',
+    initialFocusEl: searchInput,
+    trapFocus: false,
+    onBeforeClose,
+  });
 
   const renderList = () => {
     const listEl = host.querySelector('#command-palette-list') as HTMLElement | null;
@@ -105,15 +130,18 @@ export function openCommandPaletteModal(props: CommandPaletteOpenProps): () => v
         cmd.run();
       });
     });
+
+    const activeBtn = listEl.querySelector('.command-item-btn.active') as HTMLElement | null;
+    if (activeBtn && typeof (activeBtn as { scrollIntoView?: unknown }).scrollIntoView === 'function') {
+      activeBtn.scrollIntoView({ block: 'nearest' });
+    }
   };
 
   if (typeof window !== 'undefined') {
     scope.listen<KeyboardEvent>(window, 'keydown', (e) => {
-      if (
-        e.key === 'Escape' ||
-        ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K'))
-      ) {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault();
+        e.stopPropagation();
         cleanup();
         return;
       }
@@ -141,29 +169,8 @@ export function openCommandPaletteModal(props: CommandPaletteOpenProps): () => v
     });
   }
 
-  host.innerHTML = `
-    <div class="command-palette-backdrop" id="command-palette-backdrop">
-      <div class="command-palette-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(t('toolbar.commandPaletteTitle'))}">
-        <div class="command-palette-search">
-          ${Icons.search}
-          <input
-            type="text"
-            class="command-palette-input"
-            id="command-palette-input"
-            value="${escapeHtml(query)}"
-            placeholder="${escapeHtml(t('cmd.placeholder'))}"
-            autocomplete="off"
-          />
-          <kbd class="kbd-badge">Esc</kbd>
-        </div>
-        <div class="command-palette-list" id="command-palette-list"></div>
-      </div>
-    </div>
-  `;
-
   renderList();
 
-  const searchInput = host.querySelector('#command-palette-input') as HTMLInputElement | null;
   scope.listen(searchInput, 'input', () => {
     if (!searchInput) return;
     query = searchInput.value;
@@ -172,12 +179,5 @@ export function openCommandPaletteModal(props: CommandPaletteOpenProps): () => v
     renderList();
   });
 
-  scope.listen<MouseEvent>(host.querySelector('#command-palette-backdrop'), 'click', (e) => {
-    if ((e.target as HTMLElement | null)?.id === 'command-palette-backdrop') {
-      cleanup();
-    }
-  });
-
-  searchInput?.focus?.();
   return cleanup;
 }

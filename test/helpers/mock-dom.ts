@@ -359,7 +359,7 @@ export class MockHTMLElement {
 
       // Handle multi-class / compound e.g. .grid-jump-card.active or button.reel-mode-btn
       let remaining = trimmed;
-      let tagMatch = remaining.match(/^([a-zA-Z0-9_-]+)/);
+      const tagMatch = remaining.match(/^([a-zA-Z0-9_-]+)/);
       if (tagMatch) {
         if (el.tagName !== tagMatch[1].toUpperCase()) return false;
         remaining = remaining.slice(tagMatch[1].length);

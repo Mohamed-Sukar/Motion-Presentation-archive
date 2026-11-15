@@ -88,22 +88,6 @@ export class LayerStack {
     return true;
   }
 
-  dismissBelow(kind: LayerKind): void {
-    const threshold = DEFAULT_PRIORITIES[kind];
-    const toClose = this.layers.filter((item) => item.priority < threshold && item.kind !== 'stage');
-    for (const item of toClose) {
-      if (item.close) {
-        item.close();
-      } else {
-        this.remove(item.id);
-      }
-    }
-  }
-
-  getEntries(): readonly LayerEntry[] {
-    return this.layers;
-  }
-
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => {

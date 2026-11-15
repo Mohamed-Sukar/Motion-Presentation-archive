@@ -21,6 +21,29 @@ export interface TimelineDockCallbacks {
   onSelectTransition: (slideId: string) => void;
 }
 
+function formatBridgeMeta(slide: SlideNode): {
+  hasVideo: boolean;
+  bridgeTitle: string;
+  durText: string;
+} {
+  const spec = slide.transitionToNext;
+  const vid = spec.videoAsset;
+  const hasVideo = Boolean(vid);
+  const bridgeTitle = hasVideo
+    ? vid?.name || t('ctx.editTransition')
+    : t('inspector.fallbackStyleLabel');
+
+  let durText = `${((spec.fallbackDurationMs || 700) / 1000).toFixed(1)}s`;
+  if (vid) {
+    const segStart = Math.max(0, spec.startTimeSec ?? 0);
+    const segEnd = Math.max(segStart, spec.endTimeSec ?? vid.durationSec);
+    const eff = (segEnd - segStart) / Math.max(0.25, spec.playbackSpeed || 1);
+    durText = `${eff.toFixed(1)}s`;
+  }
+
+  return { hasVideo, bridgeTitle, durText };
+}
+
 export function renderTimelineDockView(
   dock: HTMLElement | null,
   scope: ComponentScope,
@@ -28,6 +51,16 @@ export function renderTimelineDockView(
   callbacks: TimelineDockCallbacks
 ): void {
   if (!dock) return;
+
+  const prevTrack = dock.querySelector('.dock-sequence-track') as HTMLElement | null;
+  const prevScrollLeft = prevTrack ? prevTrack.scrollLeft : null;
+  const prevActiveNode = dock.querySelector('.dock-seq-node.active') as HTMLElement | null;
+  const prevActiveBridge = dock.querySelector('.dock-seq-bridge.active') as HTMLElement | null;
+  const prevActiveKey = prevActiveNode
+    ? `slide:${prevActiveNode.dataset.dockSlideId || ''}`
+    : prevActiveBridge
+      ? `trans:${prevActiveBridge.dataset.dockTransSlideId || ''}`
+      : '';
 
   scope.clear();
 
@@ -75,22 +108,9 @@ export function renderTimelineDockView(
 
       if (idx >= slides.length - 1) return slideBtn;
 
-      const spec = slide.transitionToNext;
-      const vid = spec.videoAsset;
-      const hasVideo = Boolean(vid);
+      const { hasVideo, bridgeTitle, durText } = formatBridgeMeta(slide);
       const isTransActive =
         props.isTransitionSelected && props.selectedTransitionSlideId === slide.id;
-      const bridgeTitle = hasVideo
-        ? vid?.name || t('ctx.editTransition')
-        : t('inspector.fallbackStyleLabel');
-
-      let durText = `${((spec.fallbackDurationMs || 700) / 1000).toFixed(1)}s`;
-      if (vid) {
-        const segStart = Math.max(0, spec.startTimeSec ?? 0);
-        const segEnd = Math.max(segStart, spec.endTimeSec ?? vid.durationSec);
-        const eff = (segEnd - segStart) / Math.max(0.25, spec.playbackSpeed || 1);
-        durText = `${eff.toFixed(1)}s`;
-      }
 
       return `${slideBtn}
         <button
@@ -111,7 +131,7 @@ export function renderTimelineDockView(
       <div class="dock-header-lead">
         <span class="dock-title">${Icons.timelineDock} <span>${escapeHtml(t('dock.title'))}</span></span>
         <span class="dock-stat-pill tabular-nums">${slides.length} ${escapeHtml(t('dock.slidesCount'))}</span>
-        <span class="dock-stat-pill tabular-nums">${escapeHtml(t('dock.totalDuration'))}: ${escapeHtml(props.formattedTotalDuration)}</span>
+        <span class="dock-stat-pill tabular-nums" data-dock-total-duration>${escapeHtml(t('dock.totalDuration'))}: ${escapeHtml(props.formattedTotalDuration)}</span>
       </div>
       <div class="dock-header-trailing">
         <button type="button" class="btn dock-cues-btn" id="btn-stage-open-cues" title="${escapeHtml(t('dock.openCuesBtn'))}">
@@ -177,6 +197,82 @@ export function renderTimelineDockView(
       if (slideId) callbacks.onSelectTransition(slideId);
     });
   });
+
+  const nextTrack = dock.querySelector('.dock-sequence-track') as HTMLElement | null;
+  if (nextTrack) {
+    if (prevScrollLeft !== null) {
+      nextTrack.scrollLeft = prevScrollLeft;
+    }
+    const nextActiveKey = props.isTransitionSelected
+      ? `trans:${props.selectedTransitionSlideId || ''}`
+      : `slide:${props.activeSlideId || ''}`;
+    if (prevScrollLeft === null || (nextActiveKey && nextActiveKey !== prevActiveKey)) {
+      const activeEl = nextTrack.querySelector(
+        '.dock-seq-node.active, .dock-seq-bridge.active'
+      ) as HTMLElement | null;
+      activeEl?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' });
+    }
+  }
+}
+
+export function updateTimelineDockMetadataView(
+  dock: HTMLElement | null,
+  slides: SlideNode[],
+  formattedTotalDuration: string
+): boolean {
+  if (!dock || dock.classList.contains('hidden') || slides.length === 0) return false;
+  const nodeEls = Array.from(dock.querySelectorAll('.dock-seq-node')) as HTMLElement[];
+  if (nodeEls.length !== slides.length) return false;
+
+  const durationPill = dock.querySelector('[data-dock-total-duration]') as HTMLElement | null;
+  if (durationPill) {
+    durationPill.textContent = `${t('dock.totalDuration')}: ${formattedTotalDuration}`;
+  }
+
+  const slideById = new Map(slides.map((s) => [s.id, s]));
+
+  for (const node of nodeEls) {
+    const id = node.dataset.dockSlideId;
+    const slide = id ? slideById.get(id) : undefined;
+    if (!slide) return false;
+
+    node.title = slide.title;
+    const labelEl = node.querySelector('.dock-seq-label') as HTMLElement | null;
+    if (labelEl) labelEl.textContent = slide.title;
+
+    const metaEl = node.querySelector('.dock-seq-meta') as HTMLElement | null;
+    if (metaEl) {
+      const existingHold = metaEl.querySelector('.dock-seq-hold') as HTMLElement | null;
+      if (slide.holdDurationSec) {
+        const holdText = `${slide.holdDurationSec}s`;
+        if (existingHold) {
+          existingHold.textContent = holdText;
+        } else if (typeof document !== 'undefined') {
+          const span = document.createElement('span');
+          span.className = 'dock-seq-hold tabular-nums';
+          span.textContent = holdText;
+          metaEl.appendChild(span);
+        }
+      } else if (existingHold) {
+        existingHold.remove();
+      }
+    }
+  }
+
+  const bridgeEls = Array.from(dock.querySelectorAll('.dock-seq-bridge')) as HTMLElement[];
+  for (const bridge of bridgeEls) {
+    const id = bridge.dataset.dockTransSlideId;
+    const slide = id ? slideById.get(id) : undefined;
+    if (!slide) continue;
+
+    const { bridgeTitle, durText } = formatBridgeMeta(slide);
+    bridge.title = bridgeTitle;
+    bridge.setAttribute('aria-label', bridgeTitle);
+    const durEl = bridge.querySelector('.dock-bridge-dur') as HTMLElement | null;
+    if (durEl) durEl.textContent = durText;
+  }
+
+  return true;
 }
 
 export function syncTimelineDockActiveView(
@@ -187,17 +283,28 @@ export function syncTimelineDockActiveView(
 ): void {
   if (!dock || dock.classList.contains('hidden')) return;
 
-  dock.querySelectorAll('.dock-seq-node').forEach((node) => {
-    const id = (node as HTMLElement).dataset.dockSlideId;
-    node.classList.toggle('active', Boolean(id && id === activeSlideId && !isTransitionSelected));
-  });
-  dock.querySelectorAll('.dock-seq-bridge').forEach((bridge) => {
-    const id = (bridge as HTMLElement).dataset.dockTransSlideId;
-    bridge.classList.toggle(
-      'active',
-      Boolean(id && isTransitionSelected && id === selectedTransitionSlideId)
-    );
-  });
+  let changedActiveEl: HTMLElement | null = null;
+
+  for (const el of Array.from(dock.querySelectorAll('.dock-seq-node')) as HTMLElement[]) {
+    const id = el.dataset.dockSlideId;
+    const shouldBeActive = Boolean(id && id === activeSlideId && !isTransitionSelected);
+    const wasActive = el.classList.contains('active');
+    el.classList.toggle('active', shouldBeActive);
+    if (shouldBeActive && !wasActive) {
+      changedActiveEl = el;
+    }
+  }
+  for (const el of Array.from(dock.querySelectorAll('.dock-seq-bridge')) as HTMLElement[]) {
+    const id = el.dataset.dockTransSlideId;
+    const shouldBeActive = Boolean(id && isTransitionSelected && id === selectedTransitionSlideId);
+    const wasActive = el.classList.contains('active');
+    el.classList.toggle('active', shouldBeActive);
+    if (shouldBeActive && !wasActive) {
+      changedActiveEl = el;
+    }
+  }
+
+  changedActiveEl?.scrollIntoView?.({ inline: 'nearest', block: 'nearest', behavior: 'smooth' });
 }
 
 export function syncTimelineDockCollapseView(

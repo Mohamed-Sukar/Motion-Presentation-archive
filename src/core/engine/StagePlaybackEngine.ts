@@ -76,11 +76,6 @@ export class StagePlaybackEngine {
     StagePlaybackEngine.evictGlobalReverseCache();
   }
 
-  static setReverseCacheMaxEntries(maxEntries: number): void {
-    StagePlaybackEngine.maxReverseCacheEntries = Math.max(1, Math.floor(maxEntries));
-    StagePlaybackEngine.evictGlobalReverseCache();
-  }
-
   static setMaxWarmedVideos(maxVideos: number): void {
     StagePlaybackEngine.maxWarmedVideos = Math.max(1, Math.floor(maxVideos));
   }
@@ -640,24 +635,6 @@ export class StagePlaybackEngine {
     } else {
       this.enterHoldSlide(target);
     }
-  }
-
-  /**
-   * Replay the transition from the current slide to the next slide (great for previewing in Studio!)
-   */
-  previewCurrentTransition(): void {
-    if (this.slides.length === 0 || this.destroyed) return;
-    const currentIdx = this.status.currentSlideIndex;
-    const nextIdx =
-      currentIdx + 1 < this.slides.length
-        ? currentIdx + 1
-        : this.settings.loopPresentation && this.slides.length > 1
-          ? 0
-          : -1;
-
-    if (nextIdx === -1) return;
-    this.enterHoldSlide(currentIdx);
-    this.startForwardTransition(currentIdx, nextIdx);
   }
 
   /**
@@ -1886,10 +1863,6 @@ export class StagePlaybackEngine {
     if (keysToInvalidate.length > 0) {
       StagePlaybackEngine.invalidateReverseFrames(keysToInvalidate);
     }
-  }
-
-  clearReverseFrameCache(): void {
-    this.reverseFrameCache.clear();
   }
 
   private prewarmReverseFrames(

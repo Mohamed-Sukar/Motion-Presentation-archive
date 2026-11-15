@@ -9,6 +9,7 @@ const {
   isApprovedMediaPath,
 } = require('./lib/pathRegistry.cjs');
 const { writeAtomic, writeBufferAtomic } = require('./lib/atomicWrite.cjs');
+const { resolveStreamingAssets } = require('./lib/streamingAssets.cjs');
 const { indexBundle } = require('./lib/bundleIndex.cjs');
 const {
   clampZoomFactor,
@@ -58,6 +59,9 @@ let prePresentationMode = 'normal';
 let isPresentingFullscreenInStudio = false;
 let lastKnownNormalBounds = null;
 let unresponsiveDialogOpen = false;
+let projectDirty = false;
+let allowMainWindowClose = false;
+let unsavedDialogOpen = false;
 
 function resolveSystemLanguage() {
   try {
@@ -122,6 +126,17 @@ const MENU_TEXT = {
     unresponsiveMessage: 'توقفت النافذة عن الاستجابة مؤقتاً. هل تريد الانتظار أم إعادة التحميل؟',
     unresponsiveWait: 'انتظار',
     unresponsiveReload: 'إعادة التحميل',
+    unsavedTitle: 'تغييرات لم تُحفظ',
+    unsavedMessage: 'هل تريد حفظ التغييرات قبل الخروج؟',
+    unsavedDetail: 'ستفقد كل التعديلات التي أجريتها على هذا العرض إن خرجت دون حفظ.',
+    unsavedSave: 'حفظ ثم خروج',
+    unsavedDiscard: 'خروج دون حفظ',
+    unsavedCancel: 'إلغاء',
+    autosaveTitle: 'استعادة العمل غير المحفوظ',
+    autosaveMessage: 'تم العثور على تغييرات لم تُحفظ من الجلسة السابقة. هل تريد استعادتها؟',
+    autosaveDetail: 'آخر حفظ تلقائي:',
+    autosaveRecover: 'استعادة',
+    autosaveDiscard: 'تجاهل وحذف',
   },
   en: {
     file: 'File',
@@ -168,6 +183,17 @@ const MENU_TEXT = {
     unresponsiveMessage: 'The window stopped responding temporarily. Wait for it or reload Studio?',
     unresponsiveWait: 'Wait',
     unresponsiveReload: 'Reload',
+    unsavedTitle: 'Unsaved Changes',
+    unsavedMessage: 'Do you want to save your changes before closing?',
+    unsavedDetail: 'All edits to this presentation will be lost if you close without saving.',
+    unsavedSave: 'Save & Close',
+    unsavedDiscard: 'Close Without Saving',
+    unsavedCancel: 'Cancel',
+    autosaveTitle: 'Recover Unsaved Work',
+    autosaveMessage: 'Unsaved changes from your last session were found. Do you want to recover them?',
+    autosaveDetail: 'Last autosave:',
+    autosaveRecover: 'Recover',
+    autosaveDiscard: 'Discard & Delete',
   },
 };
 
@@ -524,7 +550,14 @@ function persistWindowStateNow(win) {
       displayId: display ? display.id : null,
       zoomFactor: currentZoomFactor,
     };
-    writeAtomic(getWindowStatePath(), JSON.stringify(payload, null, 2));
+    // `writeAtomic` takes a writer callback, not a payload: passing the JSON string here used to
+    // throw "writeFn is not a function", so the window geometry was never persisted and every
+    // resize produced an unhandled rejection.
+    void writeBufferAtomic(getWindowStatePath(), JSON.stringify(payload, null, 2), {
+      keepBackup: false,
+    }).catch(() => {
+      // Losing remembered bounds is cosmetic; never let it break a resize handler.
+    });
   } catch {
     // Ignore non-critical window-state write errors
   }
@@ -566,6 +599,40 @@ function applyStudioZoom(nextZoom, win = mainWindow) {
     emitWindowState(win);
   }
   return clamped;
+}
+
+/**
+ * Asked from the window `close` handler when the renderer reports unsaved changes.
+ * Save → hand control back to the renderer; it saves, then calls `app:confirm-quit`.
+ * Discard → bypass the guard once, drop the autosave snapshot and close. Cancel → stay open.
+ */
+async function promptUnsavedChanges() {
+  if (unsavedDialogOpen || !mainWindow || mainWindow.isDestroyed()) return;
+  unsavedDialogOpen = true;
+  try {
+    const L = getMenuLabels();
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: L.unsavedTitle,
+      message: L.unsavedMessage,
+      detail: L.unsavedDetail,
+      buttons: [L.unsavedSave, L.unsavedDiscard, L.unsavedCancel],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    });
+    if (response === 1) {
+      allowMainWindowClose = true;
+      await clearAutosaveFiles();
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+      return;
+    }
+    if (response === 0 && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('app:save-before-quit');
+    }
+  } finally {
+    unsavedDialogOpen = false;
+  }
 }
 
 function renderRecoveryPage(win, reasonDetail = '') {
@@ -616,10 +683,15 @@ function bindWindowStatePersistence(win) {
     isPresentingFullscreenInStudio = false;
     emitWindowState(win);
   });
-  win.on('close', () => {
+  win.on('close', (event) => {
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
+    }
+    if (!allowMainWindowClose && projectDirty) {
+      event.preventDefault();
+      void promptUnsavedChanges();
+      return;
     }
     persistWindowStateNow(win);
     if (presenterWindow && !presenterWindow.isDestroyed()) {
@@ -693,6 +765,7 @@ function createWindow() {
     }
     mainWindow.show();
     emitWindowState(mainWindow);
+    void maybeOfferAutosaveRecovery(mainWindow);
   });
 
   bindWindowStatePersistence(mainWindow);
@@ -712,6 +785,9 @@ function createWindow() {
 
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
     rendererReady = false;
+    // The renderer's in-memory project is gone with it; keeping the guard armed would leave the
+    // user with a window that can never be closed.
+    projectDirty = false;
     if (details && details.reason !== 'clean-exit') {
       renderRecoveryPage(mainWindow, `${details.reason || 'crashed'} (${details.exitCode ?? ''})`);
     }
@@ -842,6 +918,107 @@ function createPresenterWindow(payload = {}) {
 
 function getRecentProjectsFilePath() {
   return path.join(app.getPath('userData'), 'recent-projects.json');
+}
+
+// ---- Autosave snapshot (crash / accidental-close protection) ----
+
+let pendingAutosavePayload = null;
+
+function getAutosaveDirPath() {
+  return path.join(app.getPath('userData'), 'autosave');
+}
+
+function getAutosaveSessionPath() {
+  return path.join(getAutosaveDirPath(), 'session.mpres');
+}
+
+function getAutosaveMetaPath() {
+  return path.join(getAutosaveDirPath(), 'session.json');
+}
+
+async function readAutosaveMeta() {
+  try {
+    const raw = await fs.promises.readFile(getAutosaveMetaPath(), 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return {
+      savedAt: Number(parsed.savedAt) || 0,
+      title: typeof parsed.title === 'string' ? parsed.title : '',
+      sourcePath: typeof parsed.sourcePath === 'string' ? parsed.sourcePath : null,
+      slideCount: Number(parsed.slideCount) || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function clearAutosaveFiles() {
+  await fs.promises.rm(getAutosaveSessionPath(), { force: true }).catch(() => {});
+  await fs.promises.rm(getAutosaveMetaPath(), { force: true }).catch(() => {});
+}
+
+/**
+ * Maps the renderer's declarative asset descriptors onto concrete file paths or archive byte
+ * ranges. Implemented in `./lib/streamingAssets.cjs` so it can be unit-tested without Electron.
+ */
+function resolveStreamingAssetsForSave(rawAssetsInput) {
+  return resolveStreamingAssets(rawAssetsInput, { isApprovedMediaPath, getArchiveEntryRef });
+}
+
+/**
+ * Offers recovery of the last autosave snapshot. Stale snapshots (older than the project file they
+ * came from) are discarded silently so the prompt only appears when work would really be lost.
+ */
+async function maybeOfferAutosaveRecovery(win) {
+  try {
+    if (!win || win.isDestroyed()) return;
+    const meta = await readAutosaveMeta();
+    const sessionPath = getAutosaveSessionPath();
+    if (!meta || !fs.existsSync(sessionPath)) {
+      await clearAutosaveFiles();
+      return;
+    }
+    if (meta.sourcePath) {
+      const stat = await fs.promises.stat(meta.sourcePath).catch(() => null);
+      if (stat && stat.mtimeMs >= meta.savedAt) {
+        await clearAutosaveFiles();
+        return;
+      }
+    }
+    const L = getMenuLabels();
+    const when = new Date(meta.savedAt || Date.now()).toLocaleString();
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'question',
+      title: L.autosaveTitle,
+      message: L.autosaveMessage,
+      detail: `${L.autosaveDetail} ${when}`,
+      buttons: [L.autosaveRecover, L.autosaveDiscard],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    });
+    if (response !== 0) {
+      await clearAutosaveFiles();
+      return;
+    }
+    // The snapshot is handed to the renderer as bytes (not as an archive token) so the file can be
+    // removed immediately: nothing keeps streaming out of it after the hand-off.
+    const bytes = await fs.promises.readFile(sessionPath);
+    await clearAutosaveFiles();
+    const payload = {
+      buffer: toArrayBuffer(bytes),
+      fileName: 'autosave-recovery.mpres',
+      recoveredFromAutosave: true,
+    };
+    if (rendererReady && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('project:recover-autosave', payload);
+    } else {
+      pendingAutosavePayload = payload;
+    }
+  } catch {
+    // A corrupt snapshot must never block startup.
+    await clearAutosaveFiles();
+  }
 }
 
 function normalizeRecentId(filePath) {
@@ -1077,6 +1254,21 @@ if (!gotSingleInstanceLock) {
     }
   });
 
+  // Unsaved-changes guard: the renderer owns the dirty flag, the main process owns the quit flow.
+  ipcMain.on('window:set-project-dirty', (_event, dirty) => {
+    projectDirty = Boolean(dirty);
+  });
+
+  ipcMain.on('app:confirm-quit', (_event, payload) => {
+    if (!payload || payload.proceed !== true) return;
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      app.quit();
+      return;
+    }
+    allowMainWindowClose = true;
+    mainWindow.close();
+  });
+
   ipcMain.handle('app:get-version', () => {
     return app.getVersion();
   });
@@ -1104,6 +1296,11 @@ if (!gotSingleInstanceLock) {
 
   ipcMain.handle('project:consume-pending', async () => {
     rendererReady = true;
+    if (pendingAutosavePayload) {
+      const payload = pendingAutosavePayload;
+      pendingAutosavePayload = null;
+      return payload;
+    }
     const nextPath = pendingProjectFilePath;
     pendingProjectFilePath = null;
     if (!nextPath) return null;
@@ -1234,53 +1431,7 @@ if (!gotSingleInstanceLock) {
       targetPath = normalizeFinalMpresPath(result.filePath);
     }
 
-    const rawAssets = Array.isArray(payload.assets) ? payload.assets : [];
-    const missingFiles = [];
-    const resolvedAssets = [];
-
-    for (const item of rawAssets) {
-      if (!item || typeof item.archivePath !== 'string') continue;
-      if (item.source === 'file') {
-        if (!item.path || !isApprovedMediaPath(item.path)) {
-          missingFiles.push({
-            archivePath: item.archivePath,
-            fileName: item.fileName || path.basename(String(item.path || item.archivePath)),
-            path: item.path || '',
-          });
-          continue;
-        }
-        resolvedAssets.push({
-          archivePath: item.archivePath,
-          source: 'file',
-          path: item.path,
-        });
-      } else if (item.source === 'archive') {
-        const ref = getArchiveEntryRef(item.projectToken, item.archiveEntry);
-        if (!ref) {
-          missingFiles.push({
-            archivePath: item.archivePath,
-            fileName: item.fileName || path.basename(item.archiveEntry || item.archivePath),
-            path: '',
-          });
-          continue;
-        }
-        resolvedAssets.push({
-          archivePath: item.archivePath,
-          source: 'archive',
-          bundlePath: ref.bundlePath,
-          archiveEntry: ref.archiveEntry,
-          dataOffset: ref.dataOffset,
-          size: ref.size,
-          compressionMethod: ref.compressionMethod,
-        });
-      } else if (item.source === 'bytes') {
-        resolvedAssets.push({
-          archivePath: item.archivePath,
-          source: 'bytes',
-          bytes: item.bytes,
-        });
-      }
-    }
+    const { missingFiles, resolvedAssets } = resolveStreamingAssetsForSave(payload.assets);
 
     if (missingFiles.length > 0) {
       return {
@@ -1341,6 +1492,49 @@ if (!gotSingleInstanceLock) {
     if (typeof projectToken === 'string' && projectToken) {
       await closeArchiveToken(projectToken);
     }
+  });
+
+  ipcMain.handle('project:autosave', async (_event, payload) => {
+    if (!payload || typeof payload.manifestJson !== 'string') return { ok: false };
+    const { missingFiles, resolvedAssets } = resolveStreamingAssetsForSave(payload.assets);
+    if (missingFiles.length > 0) return { ok: false, code: 'MISSING_SOURCES' };
+    try {
+      await fs.promises.mkdir(getAutosaveDirPath(), { recursive: true });
+      await writeAtomic(
+        getAutosaveSessionPath(),
+        (tmpPath) =>
+          writeBundleToFile(
+            tmpPath,
+            { manifestJson: payload.manifestJson, assets: resolvedAssets },
+            () => {}
+          ),
+        { keepBackup: false }
+      );
+      const meta = {
+        savedAt: Date.now(),
+        title: payload.meta && typeof payload.meta.title === 'string' ? payload.meta.title : '',
+        sourcePath:
+          payload.meta && typeof payload.meta.sourcePath === 'string' && payload.meta.sourcePath
+            ? payload.meta.sourcePath
+            : null,
+        slideCount: payload.meta ? Number(payload.meta.slideCount) || 0 : 0,
+      };
+      await writeAtomic(
+        getAutosaveMetaPath(),
+        async (tmpPath) => {
+          await fs.promises.writeFile(tmpPath, JSON.stringify(meta, null, 2), 'utf8');
+        },
+        { keepBackup: false }
+      );
+      return { ok: true, savedAt: meta.savedAt };
+    } catch (err) {
+      console.error('Autosave failed:', err);
+      return { ok: false };
+    }
+  });
+
+  ipcMain.handle('project:clear-autosave', async () => {
+    await clearAutosaveFiles();
   });
 
   ipcMain.handle('project:open-path', async (_event, filePath) => {

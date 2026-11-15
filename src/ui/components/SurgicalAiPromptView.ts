@@ -16,6 +16,8 @@ export interface SurgicalAiPromptRenderProps {
   draftInstruction: string;
   aiMeta: ProjectAiSourceMeta | undefined;
   currentVideoTimeSec: number | null;
+  hideGroupHeader?: boolean;
+  hideCopyAction?: boolean;
 }
 
 export interface SurgicalAiPromptWireCallbacks {
@@ -75,10 +77,14 @@ export function renderSurgicalAiPromptMarkup(props: SurgicalAiPromptRenderProps)
 
   return `
     <div class="inspector-group" id="insp-ai-prompt-group">
-      <div class="inspector-group-title">
+      ${
+        props.hideGroupHeader
+          ? ''
+          : `<div class="inspector-group-title">
         <span>${escapeHtml(t('inspector.aiEditTitle'))}</span>
         ${Icons.wand}
-      </div>
+      </div>`
+      }
 
       <div class="ai-prompt-grid">
         <div class="prop-row">
@@ -138,10 +144,14 @@ export function renderSurgicalAiPromptMarkup(props: SurgicalAiPromptRenderProps)
         >${escapeHtml(previewPrompt)}</textarea>
       </div>
 
-      <button class="btn btn-primary ai-copy-btn" id="btn-copy-ai-prompt" type="button">
+      ${
+        props.hideCopyAction
+          ? ''
+          : `<button class="btn btn-prominent ai-copy-btn" id="btn-copy-ai-prompt" type="button">
         ${Icons.duplicate}
         <span>${escapeHtml(t('inspector.aiCopyBtn'))}</span>
-      </button>
+      </button>`
+      }
     </div>
   `;
 }

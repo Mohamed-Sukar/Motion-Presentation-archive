@@ -1656,6 +1656,21 @@ console.log('\n[Test 40] Window, Layout & Presenter Isolation Suite');
 const { runWindowLayoutTests } = await import('../test/window-layout.test');
 const windowLayoutRes = await runSuiteStrict('Window, Layout & Presenter Isolation', runWindowLayoutTests);
 
+// 12. Unsaved Changes, Dirty State & Quit Guard Suite
+console.log('\n[Test 41] Unsaved Changes & Quit Guard Suite');
+const { runUnsavedChangesTests } = await import('../test/unsaved-changes.test');
+const unsavedRes = await runSuiteStrict('Unsaved Changes & Quit Guard', runUnsavedChangesTests);
+
+// 13. Streaming Asset Descriptor Resolver Suite (shared by manual save and autosave)
+console.log('\n[Test 42] Streaming Asset Resolver Suite');
+const { runStreamingAssetsTests } = await import('../test/streaming-assets.test');
+const streamAssetsRes = await runSuiteStrict('Streaming Asset Resolver', runStreamingAssetsTests);
+
+// 14. Global Error Handling & Crash-Proof Fullscreen Exit Suite
+console.log('\n[Test 43] Global Error Handling Suite');
+const { runErrorReportingTests } = await import('../test/error-reporting.test');
+const errorReportingRes = await runSuiteStrict('Global Error Handling', runErrorReportingTests);
+
 console.log('[Test 33] MotionReelImporter native /motion-reel metadata & cue mapping');
 {
   const filmJson = JSON.stringify({
@@ -1894,6 +1909,9 @@ console.log(`[Phase 2] Memory & Resource Budget: ${memRes.passed}/${memRes.passe
 console.log(`[Phase 3] UI Components & Lifecycle: ${uiCompRes.passed}/${uiCompRes.passed + uiCompRes.failed} Passed`);
 console.log(`[Phase 4] Store Slices & Typed Commands: ${storeCmdRes.passed}/${storeCmdRes.passed + storeCmdRes.failed} Passed`);
 console.log(`[Window & Layout] Responsive Layout & Presenter Isolation: ${windowLayoutRes.passed}/${windowLayoutRes.passed + windowLayoutRes.failed} Passed`);
+console.log(`[Unsaved Changes] Dirty State, Quit Guard & Autosave Policy: ${unsavedRes.passed}/${unsavedRes.passed + unsavedRes.failed} Passed`);
+console.log(`[Streaming Assets] Save & Autosave Asset Descriptor Resolver: ${streamAssetsRes.passed}/${streamAssetsRes.passed + streamAssetsRes.failed} Passed`);
+console.log(`[Error Handling] Global Handlers & Crash-Proof Fullscreen Exit: ${errorReportingRes.passed}/${errorReportingRes.passed + errorReportingRes.failed} Passed`);
 console.log('------------------------------------------------------');
 console.log(`GRAND TOTAL: ${grandTotalPassed}/${grandTotalTests} Passed (${Math.round((grandTotalPassed / grandTotalTests) * 100)}%)`);
 console.log('======================================================\n');

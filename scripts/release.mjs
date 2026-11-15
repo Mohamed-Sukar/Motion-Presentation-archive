@@ -88,8 +88,17 @@ function main() {
       throw new Error(`Expected installer not found at: ${stagedExe}`);
     }
 
-    // 4. Copy finished installer artifacts to installer/ and versions/v<nextVersion>/
+    // 4. Copy finished installer artifacts to installer/ (keeping only latest there) and versions/v<nextVersion>/
     fs.mkdirSync(installerDir, { recursive: true });
+    for (const entry of fs.readdirSync(installerDir, { withFileTypes: true })) {
+      if (entry.isFile() && (entry.name.endsWith('.exe') || entry.name.endsWith('.blockmap'))) {
+        try {
+          fs.rmSync(path.join(installerDir, entry.name), { force: true });
+        } catch {
+          // Best-effort cleanup of older duplicate installer artifacts in installer/
+        }
+      }
+    }
     fs.copyFileSync(stagedExe, path.join(installerDir, exeName));
     if (fs.existsSync(stagedBlockmap)) {
       fs.copyFileSync(stagedBlockmap, path.join(installerDir, blockmapName));

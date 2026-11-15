@@ -1811,7 +1811,7 @@ export async function runPresentationControlsTests(): Promise<{ passed: number; 
   await test('T1-PRO-08', 'Adaptive theme, stage swatches, Command Palette (Ctrl+K), timeline dock & context menu work cleanly', async () => {
     resetI18nStateForTesting();
     resetThemeStateForTesting();
-    const { env, store } = await createTestApp(0);
+    const { env } = await createTestApp(0);
     try {
       setLanguage('en', { persist: false, syncDesktop: false });
       await flushMicrotasks();

@@ -63,10 +63,11 @@ export function renderWindowToolbarView(
   toolbar.innerHTML = `
     <div class="toolbar-group-leading">
       <button
-        class="btn btn-toolbar btn-icon-only ${state.isNavigatorVisible ? 'active-pane' : ''}"
+        class="btn btn-toolbar btn-icon-only ${state.hasSlides && state.isNavigatorVisible ? 'active-pane' : ''}"
         id="btn-toggle-navigator"
         title="${escapeHtml(t('toolbar.toggleNavTitle'))}"
         aria-label="${escapeHtml(t('toolbar.toggleNavTitle'))}"
+        ${!state.hasSlides ? 'disabled' : ''}
       >
         ${navIcon}
       </button>
@@ -187,10 +188,11 @@ export function renderWindowToolbarView(
           <span class="lang-toggle-code">${escapeHtml(t('toolbar.langCurrent'))}</span>
         </button>
         <button
-          class="btn btn-toolbar btn-icon-only ${state.isInspectorVisible ? 'active-pane' : ''}"
+          class="btn btn-toolbar btn-icon-only ${state.hasSlides && state.isInspectorVisible ? 'active-pane' : ''}"
           id="btn-toggle-inspector"
           title="${escapeHtml(t('toolbar.toggleInspectorTitle'))}"
           aria-label="${escapeHtml(t('toolbar.toggleInspectorTitle'))}"
+          ${!state.hasSlides ? 'disabled' : ''}
         >
           ${inspIcon}
         </button>

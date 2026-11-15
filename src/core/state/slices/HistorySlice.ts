@@ -16,10 +16,6 @@ export class HistorySlice {
     this.isRecordingSuppressed = suppressed;
   }
 
-  isSuppressed(): boolean {
-    return this.isRecordingSuppressed;
-  }
-
   collectSlideBlobUrls(slides: SlideNode[], into: Set<string> = new Set()): Set<string> {
     for (const s of slides) {
       if (s.imageAsset?.objectUrl?.startsWith('blob:')) {

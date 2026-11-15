@@ -23,12 +23,12 @@ export interface StageColorSwatch {
 
 export const STAGE_COLOR_SWATCHES: readonly StageColorSwatch[] = [
   { id: 'obsidian', hex: '#05070B', labelKey: 'swatch.obsidian' },
-  { id: 'carbon', hex: '#09090B', labelKey: 'swatch.carbon' },
+  { id: 'carbon', hex: '#161B22', labelKey: 'swatch.carbon' },
   { id: 'midnight', hex: '#0F172A', labelKey: 'swatch.midnight' },
-  { id: 'graphite', hex: '#18181B', labelKey: 'swatch.graphite' },
+  { id: 'graphite', hex: '#27272A', labelKey: 'swatch.graphite' },
   { id: 'indigo', hex: '#1E1B4B', labelKey: 'swatch.indigo' },
   { id: 'emerald', hex: '#042F2E', labelKey: 'swatch.emerald' },
-  { id: 'paper', hex: '#F4F4F5', labelKey: 'swatch.paper' },
+  { id: 'paper', hex: '#ECEAE4', labelKey: 'swatch.paper' },
   { id: 'daylight', hex: '#FFFFFF', labelKey: 'swatch.daylight' },
 ] as const;
 

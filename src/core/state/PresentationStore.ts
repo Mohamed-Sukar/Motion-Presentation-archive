@@ -42,7 +42,6 @@ import {
 } from './slices/DeckSlice';
 import { HistorySlice } from './slices/HistorySlice';
 import {
-  hydrateProjectAssetsFromCacheInStore,
   loadOpenedDesktopProjectIntoStore,
   loadProjectBundleIntoStore,
   loadProjectFromManifestIntoStore,
@@ -100,6 +99,14 @@ export class PresentationStore {
   private notification: StoreNotification | null = null;
   private isBatching = false;
   private currentProjectToken: string | null = null;
+  /**
+   * Monotonic counters used to derive the "unsaved changes" state without diffing the deck.
+   * `projectRevision` advances on every change that is persisted inside the `.mpres` bundle;
+   * `savedRevision` is advanced whenever a load or a successful save establishes a new baseline.
+   */
+  private projectRevision = 0;
+  private savedRevision = 0;
+  private forcedDirty = false;
 
   constructor() {
     this.project = createEmptyProject();
@@ -137,10 +144,46 @@ export class PresentationStore {
 
   private emit(changeType: StoreChangeType = 'structural'): void {
     if (this.isBatching) return;
+    if (PresentationStore.isPersistedChange(changeType)) {
+      this.projectRevision++;
+    }
     this.project.updatedAt = new Date().toISOString();
     for (const listener of this.listeners) {
       listener(changeType);
     }
+  }
+
+  /**
+   * Selection, notifications and other transient UI state never reach the project file, so they
+   * must not flip the document into a dirty state.
+   */
+  private static isPersistedChange(changeType: StoreChangeType): boolean {
+    return (
+      changeType === 'structural' || changeType === 'settings' || changeType === 'metadata'
+    );
+  }
+
+  /**
+   * True when the in-memory project differs from the last loaded/saved baseline.
+   */
+  isProjectDirty(): boolean {
+    return this.forcedDirty || this.projectRevision !== this.savedRevision;
+  }
+
+  /**
+   * Establishes the current revision as the saved baseline (called after load and after save).
+   */
+  markProjectSaved(): void {
+    this.forcedDirty = false;
+    this.savedRevision = this.projectRevision;
+  }
+
+  /**
+   * Marks content that was restored from a recovery source as unsaved on purpose: the bytes came
+   * from an autosave snapshot, not from the user's project file, so it still needs a real save.
+   */
+  markProjectDirty(): void {
+    this.forcedDirty = true;
   }
 
   private emitCommand(command: StudioAnyCommand): void {
@@ -675,9 +718,5 @@ export class PresentationStore {
     }
   ): void {
     loadProjectFromManifestIntoStore(this.sliceCtx, data, options);
-  }
-
-  async hydrateProjectAssetsFromCache(): Promise<number> {
-    return hydrateProjectAssetsFromCacheInStore(this.sliceCtx);
   }
 }

@@ -243,32 +243,5 @@ class DesktopProjectBackend implements ProjectFileBackend {
   }
 }
 
-class BrowserProjectBackend implements ProjectFileBackend {
-  isDesktop(): boolean {
-    return false;
-  }
-
-  async openProject(): Promise<OpenedProjectDescriptor | null> {
-    return null;
-  }
-
-  async saveProject(project: PresentationProject): Promise<StreamingSaveResult | null> {
-    await ProjectSerializer.exportProjectBundle(project);
-    return null;
-  }
-
-  async closeToken(): Promise<void> {
-    // No-op in browser mode
-  }
-}
-
-export function getProjectFileBackend(): ProjectFileBackend {
-  if (typeof window !== 'undefined' && window.desktopAPI?.saveProjectStreamed) {
-    return desktopBackendInstance;
-  }
-  return browserBackendInstance;
-}
-
 const desktopBackendInstance = new DesktopProjectBackend();
-const browserBackendInstance = new BrowserProjectBackend();
 export const projectFiles: ProjectFileBackend = desktopBackendInstance;

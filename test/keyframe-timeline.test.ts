@@ -13,14 +13,13 @@ import {
 import {
   makeMockImageAsset,
   makeMockVideoAsset,
-  createDeterministicDeck,
   flushMicrotasks,
 } from './helpers/test-fixtures';
 import { MotionPresentationApp } from '../src/ui/App';
 import { SmartPairer } from '../src/core/services/SmartPairer';
 import { StagePlaybackEngine } from '../src/core/engine/StagePlaybackEngine';
 import { ProjectSerializer } from '../src/core/services/ProjectSerializer';
-import { createSlideNode, createDefaultTransition, evaluateEasing } from '../src/core/domain/defaults';
+import { evaluateEasing } from '../src/core/domain/defaults';
 
 export async function runKeyframeTimelineTests(): Promise<{ passed: number; failed: number }> {
   console.log('\n======================================================');
@@ -343,7 +342,6 @@ export async function runKeyframeTimelineTests(): Promise<{ passed: number; fail
   });
 
   await test('T1-F6-04', 'Nudge keyframe by ±0.05s increments shifts cue timestamp', async () => {
-    const cues = [0, 5.0, 10.0];
     const duration = 10.0;
     // Nudge +0.05s on cue 1
     const nudgedPlus = SmartPairer.normalizeCuePoints([0, 5.05, 10.0], duration);
@@ -742,7 +740,7 @@ export async function runKeyframeTimelineTests(): Promise<{ passed: number; fail
       const img = makeMockImageAsset('shared_img', 'slide.png');
 
       const s1 = store.addSlideFromImage(img);
-      const s2 = store.addSlideFromImage(img); // shares same imageAsset
+      store.addSlideFromImage(img); // shares same imageAsset
 
       // Deleting s1 should NOT revoke shared_img objectUrl because s2 still references it
       store.deleteSlide(s1.id);
@@ -1263,10 +1261,10 @@ export async function runKeyframeTimelineTests(): Promise<{ passed: number; fail
       (globalThis as any).__mockVideoDuration = 8.0;
       (globalThis as any).__mockVideoFrameRenderer = (t: number, w: number, h: number) => {
         const buf = new Uint8ClampedArray(w * h * 4);
-        let r = 20;
-        let g = 28;
-        let b = 44;
-        let cardX = 0;
+        let r: number;
+        let g: number;
+        let b: number;
+        let cardX: number;
 
         if (t < 2.2) {
           // Animated transition [0..2.0] with ease-out then settles on Slide 1 [2.0..4.8]

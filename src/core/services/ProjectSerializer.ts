@@ -472,59 +472,6 @@ export class ProjectSerializer {
     return null;
   }
 
-  static exportProjectManifest(
-    project: PresentationProject,
-    options?: { embedSlideImages?: boolean }
-  ): void {
-    void options;
-    // Cache binary Blobs/Files in IndexedDB asynchronously for seamless local re-open
-    void this.cacheProjectAssetsToLocalDb(project);
-
-    const manifest = this.buildManifestObject(project);
-    this.triggerManifestDownload(project.title, manifest);
-  }
-
-  static async exportProjectManifestAsync(
-    project: PresentationProject,
-    options?: { embedSlideImages?: boolean }
-  ): Promise<void> {
-    await this.cacheProjectAssetsToLocalDb(project);
-
-    const embeddedImages = new Map<string, string>();
-    if (options?.embedSlideImages) {
-      for (const slide of project.slides) {
-        const asset = slide.imageAsset;
-        if (asset.objectUrl?.startsWith('data:')) {
-          embeddedImages.set(asset.id, asset.objectUrl);
-          continue;
-        }
-        if (asset.rawFile && asset.rawFile.size > 0 && asset.rawFile.size <= 8 * 1024 * 1024) {
-          try {
-            const dataUrl = await this.blobToDataUrl(asset.rawFile);
-            embeddedImages.set(asset.id, dataUrl);
-          } catch {
-            // Fallback to thumbnailUrl
-          }
-        }
-      }
-    }
-
-    const manifest = this.buildManifestObject(project, embeddedImages);
-    this.triggerManifestDownload(project.title, manifest);
-  }
-
-  private static triggerManifestDownload(title: string, manifest: unknown): void {
-    const json = JSON.stringify(manifest, null, 2);
-    const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    const safeName = title.replace(/[\\/:*?"<>|]/g, '_') || 'presentation';
-    a.download = `${safeName}.mpres.json`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-
   static deserializeProject(jsonString: string): DeserializedProjectData {
     const data = JSON.parse(jsonString);
     if (!data || typeof data !== 'object') {
@@ -546,16 +493,6 @@ export class ProjectSerializer {
         : undefined;
     const slidesData: SerializedSlideData[] = Array.isArray(data.slides) ? data.slides : [];
     return { projectId, title, settings, reelMetadata, aiSourceMeta, slidesData };
-  }
-
-  static async readProjectFile(file: File): Promise<DeserializedProjectData> {
-    const text = await file.text();
-    return this.deserializeProject(text);
-  }
-
-  static async readProjectBundleFromFile(file: File): Promise<LoadedProjectBundle> {
-    const buf = new Uint8Array(await file.arrayBuffer());
-    return this.parseProjectBytes(buf);
   }
 
   static async cacheProjectAssetsToLocalDb(project: PresentationProject): Promise<void> {
@@ -696,21 +633,6 @@ export class ProjectSerializer {
       } catch {
         resolve(null);
       }
-    });
-  }
-
-  private static blobToDataUrl(blob: Blob): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (typeof reader.result === 'string') {
-          resolve(reader.result);
-        } else {
-          reject(new Error('Failed to encode asset blob'));
-        }
-      };
-      reader.onerror = () => reject(new Error('FileReader error'));
-      reader.readAsDataURL(blob);
     });
   }
 }

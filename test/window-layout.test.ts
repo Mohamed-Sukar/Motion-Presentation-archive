@@ -264,13 +264,53 @@ export async function runWindowLayoutTests(): Promise<{ passed: number; failed: 
 
     const skinMatch = /\.skin-popover-backdrop\s*\{([^}]*)\}/.exec(css);
     assert.ok(skinMatch, '.skin-popover-backdrop rule must exist');
-    assert.ok(/align-items:\s*center/.test(skinMatch[1]), '.skin-popover-backdrop must center vertically');
-    assert.ok(/justify-content:\s*center/.test(skinMatch[1]), '.skin-popover-backdrop must center horizontally');
+    assert.ok(/position:\s*fixed/.test(skinMatch[1]), '.skin-popover-backdrop must be position: fixed');
+
+    const skinCenteredMatch = /\.skin-popover-backdrop\.is-centered\s*\{([^}]*)\}/.exec(css);
+    assert.ok(skinCenteredMatch, '.skin-popover-backdrop.is-centered fallback rule must exist');
+    assert.ok(/align-items:\s*center/.test(skinCenteredMatch[1]), '.skin-popover-backdrop.is-centered must center vertically');
+    assert.ok(/justify-content:\s*center/.test(skinCenteredMatch[1]), '.skin-popover-backdrop.is-centered must center horizontally');
 
     assert.ok(/\.modal-card\s*\{/.test(css), '.modal-card styling must exist');
     assert.ok(/\.modal-header\s*\{/.test(css), '.modal-header styling must exist');
     assert.ok(/\.modal-footer\s*\{/.test(css), '.modal-footer styling must exist');
   });
+
+  await test(
+    'WL-10',
+    'A remembered presenter display that was unplugged falls back instead of opening off-screen',
+    () => {
+      const studio = { id: 10, workArea: { x: 0, y: 0, width: 1920, height: 1040 } };
+
+      // The external monitor used last session is gone: the remembered id must not be trusted.
+      const afterUnplug = windowController.choosePresenterDisplay({
+        displays: [studio],
+        primaryDisplay: studio,
+        studioDisplay: studio,
+        preferredDisplayId: 20,
+      });
+      assert.equal(afterUnplug?.id, 10, 'must fall back to the studio display, not a dead display id');
+
+      // Re-plugged but with a new id: still falls back to a live display object, never null.
+      const afterReplug = windowController.choosePresenterDisplay({
+        displays: [studio, { id: 31, workArea: { x: 1920, y: 0, width: 2560, height: 1440 } }],
+        primaryDisplay: studio,
+        studioDisplay: studio,
+        preferredDisplayId: 20,
+      });
+      assert.ok(afterReplug, 'a display must always be returned');
+      assert.notEqual(afterReplug?.id, 20, 'the stale id must not survive');
+
+      // The remembered id is still valid: it must be honoured.
+      const stillValid = windowController.choosePresenterDisplay({
+        displays: [studio, { id: 20, workArea: { x: 1920, y: 0, width: 1920, height: 1080 } }],
+        primaryDisplay: studio,
+        studioDisplay: studio,
+        preferredDisplayId: 20,
+      });
+      assert.equal(stillValid?.id, 20);
+    }
+  );
 
   return { passed, failed };
 }
