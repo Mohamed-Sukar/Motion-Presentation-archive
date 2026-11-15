@@ -1,7 +1,7 @@
 {
   "name": "motion-presentation-studio",
   "productName": "Motion Presentation Studio",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Zero-Flicker Motion Graphics Presentation Studio & Player for PC",
   "author": "Motion Presentation Studio",
   "main": "electron/main.cjs",
