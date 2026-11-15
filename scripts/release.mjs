@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -55,29 +56,66 @@ function main() {
     fs.writeFileSync(lockPath, JSON.stringify(lock, null, 2) + '\n', 'utf-8');
   }
 
-  // 3. Build icons, app bundle, and NSIS installer
-  console.log('📦 Building Windows installer (npm run dist:win)...');
-  execSync('npm run dist:win', { cwd: appDir, stdio: 'inherit' });
+  // 3. Best-effort cleanup of stale workspace win-unpacked dirs, then stage NSIS build outside workspace indexer
+  for (const staleName of ['win-unpacked', 'win-unpacked.tmp']) {
+    const staleDir = path.join(installerDir, staleName);
+    if (fs.existsSync(staleDir)) {
+      try {
+        fs.rmSync(staleDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 400 });
+      } catch {
+        // Ignore if a workspace indexer holds a handle; staging build runs in os.tmpdir().
+      }
+    }
+  }
 
-  // 4. Archive installer into versions/v<nextVersion>/
   const productName = pkg.productName || 'Motion Presentation Studio';
   const exeName = `${productName} Setup ${nextVersion}.exe`;
   const blockmapName = `${exeName}.blockmap`;
-  const exeSrc = path.join(installerDir, exeName);
-  const blockmapSrc = path.join(installerDir, blockmapName);
+  const stagingOutDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mpres-release-'));
 
-  if (!fs.existsSync(exeSrc)) {
-    throw new Error(`Expected installer not found at: ${exeSrc}`);
+  try {
+    console.log(`📦 Building Windows installer via staging dir: ${stagingOutDir}`);
+    execSync('npm run build:icons', { cwd: appDir, stdio: 'inherit' });
+    execSync('npm run build', { cwd: appDir, stdio: 'inherit' });
+    execSync(`npx electron-builder --win nsis -c.directories.output="${stagingOutDir}"`, {
+      cwd: appDir,
+      stdio: 'inherit',
+    });
+
+    const stagedExe = path.join(stagingOutDir, exeName);
+    const stagedBlockmap = path.join(stagingOutDir, blockmapName);
+    if (!fs.existsSync(stagedExe)) {
+      throw new Error(`Expected installer not found at: ${stagedExe}`);
+    }
+
+    // 4. Copy finished installer artifacts to installer/ and versions/v<nextVersion>/
+    fs.mkdirSync(installerDir, { recursive: true });
+    fs.copyFileSync(stagedExe, path.join(installerDir, exeName));
+    if (fs.existsSync(stagedBlockmap)) {
+      fs.copyFileSync(stagedBlockmap, path.join(installerDir, blockmapName));
+    }
+    for (const metaFile of ['latest.yml', 'builder-debug.yml']) {
+      const stagedMeta = path.join(stagingOutDir, metaFile);
+      if (fs.existsSync(stagedMeta)) {
+        fs.copyFileSync(stagedMeta, path.join(installerDir, metaFile));
+      }
+    }
+
+    const targetDir = path.join(versionsDir, `v${nextVersion}`);
+    fs.mkdirSync(targetDir, { recursive: true });
+    fs.copyFileSync(stagedExe, path.join(targetDir, exeName));
+    if (fs.existsSync(stagedBlockmap)) {
+      fs.copyFileSync(stagedBlockmap, path.join(targetDir, blockmapName));
+    }
+
+    console.log(`\n✅ Archived installer to: ${path.relative(rootDir, targetDir)}\\${exeName}`);
+  } finally {
+    try {
+      fs.rmSync(stagingOutDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 400 });
+    } catch {
+      // Best-effort cleanup of temp staging dir
+    }
   }
-
-  const targetDir = path.join(versionsDir, `v${nextVersion}`);
-  fs.mkdirSync(targetDir, { recursive: true });
-  fs.copyFileSync(exeSrc, path.join(targetDir, exeName));
-  if (fs.existsSync(blockmapSrc)) {
-    fs.copyFileSync(blockmapSrc, path.join(targetDir, blockmapName));
-  }
-
-  console.log(`\n✅ Archived installer to: ${path.relative(rootDir, targetDir)}\\${exeName}`);
 
   // 5. Commit & tag in Git if initialized (in appDir or rootDir)
   const gitCwd = fs.existsSync(path.join(appDir, '.git'))
