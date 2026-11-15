@@ -177,7 +177,14 @@ export class SmartPairer {
 
       // Case A: Mixed Images + Videos, or Images only
       if (imageAssets.length > 0) {
-        const usedVideoIndices = new Set<number>();
+        const idleLoopVideos = videoAssets.filter((v) =>
+          SmartPairer.isIdleLoopFilename(v.name)
+        );
+        const transitionVideos = videoAssets.filter(
+          (v) => !SmartPairer.isIdleLoopFilename(v.name)
+        );
+        const usedTransIndices = new Set<number>();
+        const usedLoopIndices = new Set<number>();
 
         for (let i = 0; i < imageAssets.length; i++) {
           MediaValidator.throwIfAborted(options.signal);
@@ -188,11 +195,32 @@ export class SmartPairer {
           );
 
           const imageParsedIdx = SmartPairer.extractSlideIndexFromFilename(imageAssets[i].name);
-          let matchedVidIdx = -1;
 
-          for (let v = 0; v < videoAssets.length; v++) {
-            if (usedVideoIndices.has(v)) continue;
-            const vidTarget = SmartPairer.extractSlideIndexFromFilename(videoAssets[v].name);
+          // Match Idle Loop video (e.g., 01_loop.mp4, 02_idle.mp4)
+          let matchedLoopIdx = -1;
+          for (let l = 0; l < idleLoopVideos.length; l++) {
+            if (usedLoopIndices.has(l)) continue;
+            const loopTarget = SmartPairer.extractIdleLoopSlideIndex(idleLoopVideos[l].name);
+            if (
+              loopTarget !== null &&
+              (loopTarget === imageParsedIdx ||
+                loopTarget === i ||
+                loopTarget === existingSlidesCount + i)
+            ) {
+              matchedLoopIdx = l;
+              break;
+            }
+          }
+          if (matchedLoopIdx !== -1) {
+            usedLoopIndices.add(matchedLoopIdx);
+            slideNode.idleLoopAsset = idleLoopVideos[matchedLoopIdx];
+          }
+
+          // Match Slide-to-Slide Transition video (e.g., 01-02_transition.mp4)
+          let matchedVidIdx = -1;
+          for (let v = 0; v < transitionVideos.length; v++) {
+            if (usedTransIndices.has(v)) continue;
+            const vidTarget = SmartPairer.extractSlideIndexFromFilename(transitionVideos[v].name);
             if (
               vidTarget !== null &&
               (vidTarget === imageParsedIdx ||
@@ -205,8 +233,8 @@ export class SmartPairer {
           }
 
           if (matchedVidIdx === -1) {
-            for (let v = 0; v < videoAssets.length; v++) {
-              if (!usedVideoIndices.has(v)) {
+            for (let v = 0; v < transitionVideos.length; v++) {
+              if (!usedTransIndices.has(v)) {
                 matchedVidIdx = v;
                 break;
               }
@@ -214,17 +242,22 @@ export class SmartPairer {
           }
 
           if (matchedVidIdx !== -1) {
-            usedVideoIndices.add(matchedVidIdx);
-            slideNode.transitionToNext.videoAsset = videoAssets[matchedVidIdx];
+            usedTransIndices.add(matchedVidIdx);
+            slideNode.transitionToNext.videoAsset = transitionVideos[matchedVidIdx];
             transitionsMatched++;
           }
 
           newSlides.push(slideNode);
         }
 
-        for (let v = 0; v < videoAssets.length; v++) {
-          if (!usedVideoIndices.has(v)) {
-            unpairedVideos.push(videoAssets[v]);
+        for (let v = 0; v < transitionVideos.length; v++) {
+          if (!usedTransIndices.has(v)) {
+            unpairedVideos.push(transitionVideos[v]);
+          }
+        }
+        for (let l = 0; l < idleLoopVideos.length; l++) {
+          if (!usedLoopIndices.has(l)) {
+            unpairedVideos.push(idleLoopVideos[l]);
           }
         }
       }
@@ -450,6 +483,33 @@ export class SmartPairer {
   static extractSlideIndexFromFilename(name: string): number | null {
     const parsed = SmartPairer.parseIndicesFromFilename(name);
     return parsed ? parsed.fromIndex : null;
+  }
+
+  static isIdleLoopFilename(name: string): boolean {
+    const stem = name.replace(/\.[^/.]+$/, '');
+    if (!/(?:^|[_\-\s.])(?:loop|idle)(?:[_\-\s.]|$)/i.test(stem)) {
+      return false;
+    }
+    if (/(?:_to_|-to-|\s+to\s+)/i.test(stem)) {
+      return false;
+    }
+    const sanitized = stem
+      .replace(/([_\-\s.]|^)\d{3,4}x\d{3,4}(?=[_\-\s.]|$)/gi, '$1')
+      .replace(/([_\-\s.]|^)(?:2160|1440|1080|720|540|480|360|240)p(?=[_\-\s.]|$)/gi, '$1')
+      .replace(/([_\-\s.]|^)(?:24|25|30|48|50|60|120|240)fps(?=[_\-\s.]|$)/gi, '$1')
+      .replace(/([_\-\s.]|^)(?:4k|8k|2k)(?=[_\-\s.]|$)/gi, '$1');
+    const pairMatch = sanitized.match(/(?:^|[^\d])(\d+)\s*[-_]\s*(\d+)(?:$|[^\d])/);
+    if (pairMatch) {
+      const a = parseInt(pairMatch[1], 10);
+      const b = parseInt(pairMatch[2], 10);
+      if (!isResolutionPair(a, b)) return false;
+    }
+    return true;
+  }
+
+  static extractIdleLoopSlideIndex(name: string): number | null {
+    if (!SmartPairer.isIdleLoopFilename(name)) return null;
+    return SmartPairer.extractSlideIndexFromFilename(name);
   }
 
   static normalizeCuePoints(cueTimesSec: number[], durationSec: number): number[] {
@@ -1381,7 +1441,6 @@ function analyzeMotionCurve(
 
     if (bestVel === Infinity) {
       bestIdx = plateau.rawStartIdx;
-      bestSharp = signatures?.[bestIdx]?.meanEdgeSharpness ?? 0;
     }
 
     const cueTime = Number(Math.min(durationSec, sampleTimes[bestIdx]).toFixed(2));

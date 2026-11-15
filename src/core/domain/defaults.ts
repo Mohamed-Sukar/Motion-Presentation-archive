@@ -109,6 +109,7 @@ export function createSlideNode(
     title: cleanTitle || t('slide.defaultTitle', { index: index + 1 }),
     notes: '',
     imageAsset,
+    idleLoopAsset: null,
     holdDurationSec: null,
     transitionToNext: createDefaultTransition(fallbackStyle, null, fallbackDurationMs),
   };

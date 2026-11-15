@@ -9,6 +9,7 @@ import {
   MediaAsset,
   PresentationProject,
   PresentationSettings,
+  ProjectAiSourceMeta,
   ReelMetadata,
   SegmentEasing,
   SlideNode,
@@ -46,6 +47,7 @@ export interface ApplyCuePointsOptions {
   matchAspectRatio?: boolean;
   preserveMetadata?: boolean;
   segmentEasings?: SegmentEasing[];
+  cueLabels?: string[];
   onProgress?: (done: number, total: number, timeSec?: number) => void;
   signal?: AbortSignal;
 }
@@ -189,6 +191,10 @@ export class PresentationStore {
         if (vidUrl?.startsWith('blob:')) {
           live.add(vidUrl);
         }
+        const loopUrl = s.idleLoopAsset?.objectUrl;
+        if (loopUrl?.startsWith('blob:')) {
+          live.add(loopUrl);
+        }
       }
     };
     addFromSlides(this.project.slides);
@@ -222,6 +228,8 @@ export class PresentationStore {
     return {
       ...s,
       imageAsset: { ...s.imageAsset },
+      idleLoopAsset: s.idleLoopAsset ? { ...s.idleLoopAsset } : null,
+      sourceMeta: s.sourceMeta ? { ...s.sourceMeta } : undefined,
       transitionToNext: {
         ...s.transitionToNext,
         videoAsset: s.transitionToNext.videoAsset ? { ...s.transitionToNext.videoAsset } : null,
@@ -254,6 +262,7 @@ export class PresentationStore {
     this.project.slides = snap.slides.map((s) => {
       const restored = this.cloneSlideForHistory(s);
       this.reviveBlobUrlIfRevoked(restored.imageAsset);
+      this.reviveBlobUrlIfRevoked(restored.idleLoopAsset);
       this.reviveBlobUrlIfRevoked(restored.transitionToNext.videoAsset);
       return restored;
     });
@@ -743,6 +752,7 @@ export class PresentationStore {
       {
         defaultFallback: this.project.settings.defaultFallbackStyle,
         segmentEasings: opts.segmentEasings,
+        cueLabels: opts.cueLabels,
         onProgress: opts.onProgress
           ? (done, total, timeSec) => opts.onProgress?.(done, total, timeSec)
           : undefined,
@@ -810,7 +820,7 @@ export class PresentationStore {
     this.batchUpdate(() => {
       const candidateRevokeUrls: Array<string | undefined> = [];
       const staleReverseKeys: string[] = [];
-      let insertIndex = 0;
+      let insertIndex: number;
 
       if (mode === 'replace-all') {
         for (const slide of this.project.slides) {
@@ -1228,6 +1238,28 @@ export class PresentationStore {
     this.emit('structural');
   }
 
+  setProjectAiSourceMeta(meta: ProjectAiSourceMeta | undefined): void {
+    this.project.aiSourceMeta = meta ? { ...meta } : undefined;
+    this.emit('metadata');
+  }
+
+  getProjectAiSourceMeta(): ProjectAiSourceMeta | undefined {
+    return this.project.aiSourceMeta;
+  }
+
+  setSlideIdleLoopVideo(slideId: string, videoAsset: MediaAsset | null): void {
+    const slide = this.project.slides.find((s) => s.id === slideId);
+    if (!slide) return;
+    this.recordHistorySnapshot();
+    const oldUrl = slide.idleLoopAsset?.objectUrl;
+    slide.idleLoopAsset = videoAsset;
+    slide.expectedIdleLoopFileName = undefined;
+    if (oldUrl && oldUrl !== videoAsset?.objectUrl) {
+      this.revokeUrlsIfUnused([oldUrl]);
+    }
+    this.emit('structural');
+  }
+
   setSlideTransitionVideo(slideId: string, videoAsset: MediaAsset | null): void {
     const slide = this.project.slides.find((s) => s.id === slideId);
     if (!slide) return;
@@ -1564,6 +1596,9 @@ export class PresentationStore {
     const [removed] = this.project.slides.splice(idx, 1);
 
     if (!removed) return;
+    if (removed.idleLoopAsset?.objectUrl) {
+      candidateRevokeUrls.push(removed.idleLoopAsset.objectUrl);
+    }
 
     if (transitionChoice === 'above') {
       if (prevSlide) {
@@ -1911,6 +1946,7 @@ export class PresentationStore {
     const keysToInvalidate: string[] = [];
     for (const slide of this.project.slides) {
       urlsToCheck.push(slide.imageAsset?.objectUrl);
+      urlsToCheck.push(slide.idleLoopAsset?.objectUrl);
       urlsToCheck.push(slide.transitionToNext?.videoAsset?.objectUrl);
       keysToInvalidate.push(slide.transitionToNext.id);
       if (slide.transitionToNext?.videoAsset?.id) {
@@ -1919,6 +1955,7 @@ export class PresentationStore {
     }
     this.project.slides = [];
     this.project.reelMetadata = undefined;
+    this.project.aiSourceMeta = undefined;
     this.revokeUrlsIfUnused(urlsToCheck);
     StagePlaybackEngine.invalidateReverseFrames(keysToInvalidate);
     this.activePreviewIndex = 0;
@@ -2000,6 +2037,7 @@ export class PresentationStore {
     const oldReverseKeys: string[] = [];
     for (const s of this.project.slides) {
       oldUrls.push(s.imageAsset?.objectUrl);
+      oldUrls.push(s.idleLoopAsset?.objectUrl);
       oldUrls.push(s.transitionToNext?.videoAsset?.objectUrl);
       oldReverseKeys.push(s.transitionToNext.id);
       if (s.transitionToNext?.videoAsset?.id) {
@@ -2014,6 +2052,7 @@ export class PresentationStore {
       ProjectSerializer.saveSettingsToLocal(this.project.settings);
     }
     this.project.reelMetadata = data.reelMetadata;
+    this.project.aiSourceMeta = data.aiSourceMeta;
 
     if (Array.isArray(data.slides) && data.slides.length > 0 && 'imageAsset' in data.slides[0]) {
       this.project.slides = data.slides;
@@ -2088,6 +2127,21 @@ export class PresentationStore {
         slide.notes = sd.notes || '';
         slide.holdDurationSec =
           typeof sd.holdDurationSec === 'number' ? sd.holdDurationSec : null;
+        if (sd.sourceMeta && typeof sd.sourceMeta === 'object') {
+          slide.sourceMeta = sd.sourceMeta;
+        }
+        const preloadedIdleLoop =
+          typeof sd.idleLoopArchivePath === 'string'
+            ? options?.preloadedAssets?.videoMap.get(sd.idleLoopArchivePath)
+            : undefined;
+        if (preloadedIdleLoop) {
+          slide.idleLoopAsset = preloadedIdleLoop;
+          slide.expectedIdleLoopFileName = undefined;
+        } else if (typeof sd.expectedIdleLoopFileName === 'string' && sd.expectedIdleLoopFileName) {
+          slide.expectedIdleLoopFileName = sd.expectedIdleLoopFileName;
+        } else if (typeof sd.idleLoopFileName === 'string' && sd.idleLoopFileName) {
+          slide.expectedIdleLoopFileName = sd.idleLoopFileName;
+        }
 
         if (tr) {
           slide.transitionToNext.playbackSpeed =

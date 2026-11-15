@@ -9,6 +9,7 @@ import {
   MediaAsset,
   PresentationSettings,
   SegmentEasing,
+  SlideNode,
 } from '../core/domain/types';
 import { StagePlaybackEngine } from '../core/engine/StagePlaybackEngine';
 import { DemoGenerator } from '../core/services/DemoGenerator';
@@ -25,6 +26,7 @@ import {
 } from '../core/services/MediaValidator';
 import { ProjectSerializer } from '../core/services/ProjectSerializer';
 import { CueDetectionResult, CueDetectionSensitivity, SmartPairer } from '../core/services/SmartPairer';
+import { MotionReelImporter, MotionReelMetadata } from '../core/services/MotionReelImporter';
 import {
   AppLanguage,
   detectInitialLanguage,
@@ -118,6 +120,8 @@ export class MotionPresentationApp {
   private isSlideGridOpen = false;
   private isGeneratingDemo = false;
   private isSavingProject = false;
+  private aiEditDraftInstruction = '';
+  private aiEditScopeOverride: 'slide' | 'idle-loop' | 'transition' | 'project' | null = null;
   private currentProjectFilePath: string | null = null;
   private presenterCursorTimer: number | null = null;
   private presenterOverlayEl: HTMLElement | null = null;
@@ -2072,6 +2076,28 @@ export class MotionPresentationApp {
               ${t('inspector.replaceImage')}
             </button>
           </div>
+
+          <div class="prop-row" style="margin-bottom: 0; padding-top: 6px; border-top: 1px solid var(--border-subtle);">
+            <span class="prop-label">${t('inspector.idleLoopSection')}</span>
+            <div class="prop-subtext" style="word-break: break-all;">
+              ${
+                activeSlide.idleLoopAsset
+                  ? `<bdi dir="ltr">${this.escapeHtml(activeSlide.idleLoopAsset.name)}</bdi> (${activeSlide.idleLoopAsset.durationSec.toFixed(1)}s)`
+                  : t('inspector.idleLoopNone')
+              }
+            </div>
+            <div style="display: flex; gap: 6px; margin-top: 4px;">
+              <button class="btn" id="btn-assign-idle-loop" style="flex: 1;">
+                ${Icons.replay}
+                <span>${activeSlide.idleLoopAsset ? t('inspector.idleLoopReplace') : t('inspector.idleLoopAssign')}</span>
+              </button>
+              ${
+                activeSlide.idleLoopAsset
+                  ? `<button class="btn btn-destructive" id="btn-remove-idle-loop" title="${this.escapeHtml(t('inspector.idleLoopRemove'))}">${Icons.trash}<span>${t('inspector.idleLoopRemove')}</span></button>`
+                  : ''
+              }
+            </div>
+          </div>
         </div>
 
         <div class="inspector-group">
@@ -2116,6 +2142,8 @@ export class MotionPresentationApp {
             >${this.escapeHtml(activeSlide.notes || '')}</textarea>
           </div>
         </div>
+
+        ${this.renderSurgicalAiPromptGroup(activeSlide, slideIdx, slides.length, 'slide')}
 
         <div class="inspector-group" style="border-bottom: none;">
           <button class="btn" id="btn-insp-duplicate-slide" style="width: 100%; margin-bottom: 6px;">
@@ -2398,6 +2426,8 @@ export class MotionPresentationApp {
             <span>${t('inspector.applyAllTrans')}</span>
           </button>
         </div>
+
+        ${this.renderSurgicalAiPromptGroup(activeSlide, slideIdx, slides.length, 'transition')}
       `;
     } else {
       contentHtml = `
@@ -2678,6 +2708,19 @@ export class MotionPresentationApp {
         input.click();
       });
 
+      pane.querySelector('#btn-assign-idle-loop')?.addEventListener('click', () => {
+        const input = this.root.querySelector('#single-video-input') as HTMLInputElement;
+        if (!input) return;
+        delete input.dataset.targetSlideId;
+        input.dataset.idleLoopSlideId = activeSlide.id;
+        input.click();
+      });
+
+      pane.querySelector('#btn-remove-idle-loop')?.addEventListener('click', () => {
+        this.store.setSlideIdleLoopVideo(activeSlide.id, null);
+        this.store.notify(t('notify.idleLoopRemoved'), 'info');
+      });
+
       pane.querySelector('#btn-insp-duplicate-slide')?.addEventListener('click', () => {
         if (this.store.duplicateSlide(activeSlide.id)) {
           this.store.notify(t('notify.slideDuplicated'), 'success', 2000);
@@ -2687,14 +2730,19 @@ export class MotionPresentationApp {
       pane.querySelector('#btn-insp-delete-slide')?.addEventListener('click', () => {
         this.promptDeleteSlide(activeSlide.id);
       });
+
+      this.wireSurgicalAiPromptEvents(pane, activeSlide, slides.indexOf(activeSlide), slides.length);
     }
 
     if (activeSegment === 'transition' && activeSlide) {
       const spec = activeSlide.transitionToNext;
       const vid = spec.videoAsset;
 
+      this.wireSurgicalAiPromptEvents(pane, activeSlide, slides.indexOf(activeSlide), slides.length);
+
       pane.querySelector('#btn-replace-trans-video')?.addEventListener('click', () => {
         const input = this.root.querySelector('#single-video-input') as HTMLInputElement;
+        delete input.dataset.idleLoopSlideId;
         input.dataset.targetSlideId = activeSlide.id;
         input.click();
       });
@@ -3051,6 +3099,221 @@ export class MotionPresentationApp {
     }
   }
 
+  private renderSurgicalAiPromptGroup(
+    activeSlide: SlideNode,
+    slideIdx: number,
+    totalSlides: number,
+    defaultScope: 'slide' | 'transition'
+  ): string {
+    const aiMeta = this.store.getProjectAiSourceMeta();
+    const skillName: 'new-motion-presentation' | 'create-new' =
+      aiMeta?.skillName === 'create-new' ? 'create-new' : 'new-motion-presentation';
+    const scope = this.aiEditScopeOverride ?? defaultScope;
+    const outputDirPath = aiMeta?.outputDirPath || aiMeta?.projectRootPath || '';
+    const lang = getLanguage();
+    const currentVideoTime = this.previewEngine?.getActiveVideoTimeSec?.() ?? null;
+
+    const previewPrompt = MotionReelImporter.buildSurgicalEditPrompt({
+      skillName,
+      projectRootPath: aiMeta?.projectRootPath || outputDirPath,
+      outputDirPath,
+      scope,
+      slideIndex: slideIdx + 1,
+      totalSlides,
+      slideTitle: activeSlide.title,
+      hasIdleLoop: Boolean(activeSlide.idleLoopAsset || activeSlide.expectedIdleLoopFileName),
+      currentTimecodeSec: currentVideoTime,
+      sourceMeta: activeSlide.sourceMeta,
+      userInstruction: this.aiEditDraftInstruction,
+      language: lang,
+    });
+
+    const chipLoopVal =
+      lang === 'ar'
+        ? 'أضف حركة خمول دائرية ناعمة (Idle Loop) تلتزم بنقطة الراحة مع بقاء النصوص ثابتة.'
+        : 'Add a subtle Rest-Pose Idle Loop animation keeping core typography rock-steady.';
+    const chipFasterVal =
+      lang === 'ar'
+        ? 'اجعل التوقيت أسرع وأكثر حيوية (Snappier spring easing).'
+        : 'Make the motion timing snappier with crisp spring easing.';
+    const chipZoomVal =
+      lang === 'ar'
+        ? 'نفّذ انتقال كاميرا سلس (Camera Zoom Morph) نحو العنصر الرئيسي.'
+        : 'Use a smooth log-space camera zoom morph into the hero element.';
+    const chipColorsVal =
+      lang === 'ar'
+        ? 'حسّن تباين الألوان ووضوح العناوين.'
+        : 'Boost color contrast and headline legibility.';
+    const chipAltVal =
+      lang === 'ar'
+        ? 'ابتكر تصميماً وحركة بديلة أكثر إبداعاً لنفس المحتوى.'
+        : 'Propose and render a fresh, higher-creativity visual alternative for this same content.';
+
+    return `
+      <div class="inspector-group" id="insp-ai-prompt-group">
+        <div class="inspector-group-title">
+          <span>${t('inspector.aiEditTitle')}</span>
+          ${Icons.wand}
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+          <div class="prop-row" style="margin-bottom: 6px;">
+            <label class="prop-label" for="insp-ai-scope">${t('inspector.aiScopeLabel')}</label>
+            <select class="select-field" id="insp-ai-scope">
+              <option value="slide" ${scope === 'slide' ? 'selected' : ''}>${t('inspector.aiScopeSlide')}</option>
+              <option value="idle-loop" ${scope === 'idle-loop' ? 'selected' : ''}>${t('inspector.aiScopeLoop')}</option>
+              <option value="transition" ${scope === 'transition' ? 'selected' : ''}>${t('inspector.aiScopeTransition')}</option>
+              <option value="project" ${scope === 'project' ? 'selected' : ''}>${t('inspector.aiScopeProject')}</option>
+            </select>
+          </div>
+          <div class="prop-row" style="margin-bottom: 6px;">
+            <label class="prop-label" for="insp-ai-skill">${t('inspector.aiSkillLabel')}</label>
+            <select class="select-field" id="insp-ai-skill">
+              <option value="new-motion-presentation" ${skillName === 'new-motion-presentation' ? 'selected' : ''}>/new-motion-presentation</option>
+              <option value="create-new" ${skillName === 'create-new' ? 'selected' : ''}>/create-new</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="prop-row">
+          <label class="prop-label" for="insp-ai-path">${t('inspector.aiPathLabel')}</label>
+          <input
+            type="text"
+            class="input-field"
+            id="insp-ai-path"
+            dir="ltr"
+            placeholder="${this.escapeHtml(t('inspector.aiPathPlaceholder'))}"
+            value="${this.escapeHtml(outputDirPath)}"
+          />
+        </div>
+
+        <div class="prop-row">
+          <label class="prop-label" for="insp-ai-custom-input">${t('inspector.aiInstructionLabel')}</label>
+          <div style="display:flex; flex-wrap:wrap; gap:4px; margin-bottom:6px;">
+            <button type="button" class="btn btn-xs ai-quick-chip" data-chip-text="${this.escapeHtml(chipLoopVal)}">${Icons.replay}<span>${t('inspector.chipLoop')}</span></button>
+            <button type="button" class="btn btn-xs ai-quick-chip" data-chip-text="${this.escapeHtml(chipFasterVal)}">${Icons.bolt}<span>${t('inspector.chipFaster')}</span></button>
+            <button type="button" class="btn btn-xs ai-quick-chip" data-chip-text="${this.escapeHtml(chipZoomVal)}">${Icons.maximize}<span>${t('inspector.chipZoom')}</span></button>
+            <button type="button" class="btn btn-xs ai-quick-chip" data-chip-text="${this.escapeHtml(chipColorsVal)}">${Icons.palette}<span>${t('inspector.chipColors')}</span></button>
+            <button type="button" class="btn btn-xs ai-quick-chip" data-chip-text="${this.escapeHtml(chipAltVal)}">${Icons.sparkles}<span>${t('inspector.chipAlt')}</span></button>
+          </div>
+          <textarea
+            class="textarea-field"
+            id="insp-ai-custom-input"
+            rows="3"
+            placeholder="${this.escapeHtml(t('inspector.aiInstructionPlaceholder'))}"
+          >${this.escapeHtml(this.aiEditDraftInstruction)}</textarea>
+        </div>
+
+        <div class="prop-row" style="margin-bottom: 6px;">
+          <label class="prop-label" for="insp-ai-prompt-output">${t('inspector.aiPreviewLabel')}</label>
+          <textarea
+            class="textarea-field"
+            id="insp-ai-prompt-output"
+            rows="5"
+            readonly
+            style="font-family: var(--font-mono, monospace); font-size: 11px; opacity: 0.92;"
+          >${this.escapeHtml(previewPrompt)}</textarea>
+        </div>
+
+        <button class="btn btn-primary" id="btn-copy-ai-prompt" type="button" style="width: 100%;">
+          ${Icons.duplicate}
+          <span>${t('inspector.aiCopyBtn')}</span>
+        </button>
+      </div>
+    `;
+  }
+
+  private wireSurgicalAiPromptEvents(
+    pane: HTMLElement,
+    activeSlide: SlideNode,
+    slideIdx: number,
+    totalSlides: number
+  ): void {
+    const scopeSel = pane.querySelector('#insp-ai-scope') as HTMLSelectElement | null;
+    const skillSel = pane.querySelector('#insp-ai-skill') as HTMLSelectElement | null;
+    const pathIn = pane.querySelector('#insp-ai-path') as HTMLInputElement | null;
+    const customIn = pane.querySelector('#insp-ai-custom-input') as HTMLTextAreaElement | null;
+    const outputPreview = pane.querySelector('#insp-ai-prompt-output') as HTMLTextAreaElement | null;
+    const copyBtn = pane.querySelector('#btn-copy-ai-prompt') as HTMLButtonElement | null;
+
+    const refreshPreview = () => {
+      if (!outputPreview) return;
+      const scope = (scopeSel?.value || 'slide') as
+        | 'slide'
+        | 'idle-loop'
+        | 'transition'
+        | 'project';
+      const skillName = (skillSel?.value || 'new-motion-presentation') as
+        | 'new-motion-presentation'
+        | 'create-new';
+      const pathVal = pathIn?.value ?? '';
+      const aiMeta = this.store.getProjectAiSourceMeta();
+      this.aiEditScopeOverride = scope;
+      this.aiEditDraftInstruction = customIn?.value ?? '';
+
+      outputPreview.value = MotionReelImporter.buildSurgicalEditPrompt({
+        skillName,
+        projectRootPath: aiMeta?.projectRootPath || pathVal,
+        outputDirPath: pathVal,
+        scope,
+        slideIndex: Math.max(1, slideIdx + 1),
+        totalSlides,
+        slideTitle: activeSlide.title,
+        hasIdleLoop: Boolean(activeSlide.idleLoopAsset || activeSlide.expectedIdleLoopFileName),
+        currentTimecodeSec: this.previewEngine?.getActiveVideoTimeSec?.() ?? null,
+        sourceMeta: activeSlide.sourceMeta,
+        userInstruction: this.aiEditDraftInstruction,
+        language: getLanguage(),
+      });
+    };
+
+    scopeSel?.addEventListener('change', refreshPreview);
+    skillSel?.addEventListener('change', () => {
+      const curr = this.store.getProjectAiSourceMeta() || {};
+      this.store.setProjectAiSourceMeta({
+        ...curr,
+        skillName: skillSel.value as 'new-motion-presentation' | 'create-new',
+      });
+      refreshPreview();
+    });
+    pathIn?.addEventListener('input', refreshPreview);
+    pathIn?.addEventListener('change', () => {
+      const curr = this.store.getProjectAiSourceMeta() || {};
+      this.store.setProjectAiSourceMeta({
+        ...curr,
+        outputDirPath: pathIn.value.trim(),
+        projectRootPath: curr.projectRootPath || pathIn.value.trim(),
+      });
+      refreshPreview();
+    });
+    customIn?.addEventListener('input', refreshPreview);
+
+    pane.querySelectorAll('.ai-quick-chip').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        const snippet = (chip as HTMLElement).dataset.chipText || '';
+        if (!snippet || !customIn) return;
+        const current = customIn.value.trim();
+        customIn.value = current ? `${current}\n- ${snippet}` : snippet;
+        refreshPreview();
+        customIn.focus();
+      });
+    });
+
+    copyBtn?.addEventListener('click', async () => {
+      refreshPreview();
+      const text = outputPreview?.value || '';
+      if (!text) return;
+      try {
+        await navigator.clipboard?.writeText(text);
+        this.store.notify(t('notify.aiPromptCopied'), 'success', 2500);
+      } catch {
+        outputPreview?.select();
+        document.execCommand?.('copy');
+        this.store.notify(t('notify.aiPromptCopied'), 'success', 2500);
+      }
+    });
+  }
+
   private renderToast(): void {
     const container = this.root.querySelector('#toast-container') as HTMLElement;
     if (!container) return;
@@ -3116,7 +3379,14 @@ export class MotionPresentationApp {
       if (!singleVidInput.files?.length) return;
       const file = singleVidInput.files[0];
       const targetSlideId = singleVidInput.dataset.targetSlideId;
+      const idleLoopSlideId = singleVidInput.dataset.idleLoopSlideId;
+      delete singleVidInput.dataset.targetSlideId;
+      delete singleVidInput.dataset.idleLoopSlideId;
       singleVidInput.value = '';
+      if (idleLoopSlideId) {
+        await this.attachIdleLoopVideoToSlide(idleLoopSlideId, file);
+        return;
+      }
       if (!targetSlideId) return;
       await this.attachVideoFileToSlide(targetSlideId, file);
     });
@@ -3139,6 +3409,23 @@ export class MotionPresentationApp {
       if (!target) return;
       await this.performVideoRelink(target, file);
     });
+  }
+
+  private async attachIdleLoopVideoToSlide(slideId: string, file: File): Promise<void> {
+    try {
+      this.store.notify(t('notify.analyzingVideo', { name: file.name }), 'info', 2000);
+      const videoAsset = await MediaValidator.ingestFile(file, 'video');
+      this.store.setSlideIdleLoopVideo(slideId, videoAsset);
+      this.store.notify(
+        t('notify.idleLoopAssigned', { name: videoAsset.name }),
+        'success'
+      );
+    } catch (err) {
+      this.store.notify(
+        err instanceof Error ? err.message : t('notify.videoUnsupported'),
+        'error'
+      );
+    }
   }
 
   private async attachVideoFileToSlide(slideId: string, file: File): Promise<void> {
@@ -3194,8 +3481,10 @@ export class MotionPresentationApp {
       e.preventDefault();
       showDragState(false);
       if (this.isModalOpen) return;
-      if (!e.dataTransfer?.files?.length) return;
-      await this.handleBatchFiles(Array.from(e.dataTransfer.files));
+      if (!e.dataTransfer) return;
+      const droppedFiles = await MotionReelImporter.extractFilesFromDataTransfer(e.dataTransfer);
+      if (!droppedFiles.length) return;
+      await this.handleBatchFiles(droppedFiles);
     });
   }
 
@@ -3215,10 +3504,64 @@ export class MotionPresentationApp {
       }
     }
 
-    this.store.notify(t('notify.batchScanning', { count: files.length }), 'info', 3000);
+    if (files.length > 1) {
+      const reelBundle = await MotionReelImporter.parseBundle(files);
+      if (reelBundle.isMotionReel && reelBundle.primaryVideoFile) {
+        try {
+          const videoAsset = await MediaValidator.ingestFile(reelBundle.primaryVideoFile, 'video');
+          const existingSlides = this.store.getSlides();
+          if (reelBundle.title && existingSlides.length === 0) {
+            this.store.setProjectTitle(reelBundle.title);
+          }
+          if (reelBundle.suggestedAspectRatio && existingSlides.length === 0) {
+            this.store.updateSettings({ aspectRatio: reelBundle.suggestedAspectRatio });
+          }
+          const cueCount =
+            reelBundle.recommendedCuePointsSec.length > 0
+              ? reelBundle.recommendedCuePointsSec.length
+              : 2;
+          this.store.notify(
+            t('notify.motionReelDetected', {
+              title: reelBundle.title || reelBundle.primaryVideoFile.name,
+              cues: cueCount,
+            }),
+            'success',
+            4500
+          );
+          this.openReelCueModal(videoAsset, {
+            mode: existingSlides.length === 0 ? 'replace-all' : 'append',
+            initialCuePoints:
+              reelBundle.recommendedCuePointsSec.length >= 2
+                ? reelBundle.recommendedCuePointsSec
+                : undefined,
+            initialCueLabels:
+              reelBundle.recommendedCueLabels.length >= 2
+                ? reelBundle.recommendedCueLabels
+                : undefined,
+            motionReelMeta: reelBundle,
+          });
+          return;
+        } catch (err) {
+          this.store.notify(
+            err instanceof Error ? err.message : t('notify.videoUnsupported'),
+            'error'
+          );
+          return;
+        }
+      }
+    }
+
+    const manifestFile = MotionReelImporter.findPresentationManifestFile(files);
+    const parsedManifest = manifestFile
+      ? MotionReelImporter.parsePresentationManifest(await manifestFile.text().catch(() => null))
+      : null;
+    const mediaFiles = files.filter((f) => !/\.json$/i.test(f.name));
+    if (!mediaFiles.length) return;
+
+    this.store.notify(t('notify.batchScanning', { count: mediaFiles.length }), 'info', 3000);
     try {
       const { newSlides, unpairedVideos, report } = await SmartPairer.processBatchFiles(
-        files,
+        mediaFiles,
         this.store.getSlides().length,
         this.store.getSettings().defaultFallbackStyle,
         {
@@ -3231,6 +3574,36 @@ export class MotionPresentationApp {
           },
         }
       );
+
+      let inferredDir: string | undefined;
+      const firstPath = window.desktopAPI?.getPathForFile?.(mediaFiles[0]);
+      if (firstPath) {
+        const sepIdx = Math.max(firstPath.lastIndexOf('\\'), firstPath.lastIndexOf('/'));
+        if (sepIdx > 0) inferredDir = firstPath.slice(0, sepIdx);
+      }
+
+      if (parsedManifest) {
+        const aiMeta = MotionReelImporter.applyPresentationManifestToSlides(
+          newSlides,
+          parsedManifest
+        );
+        if (!aiMeta.outputDirPath && inferredDir) {
+          aiMeta.outputDirPath = inferredDir;
+        }
+        if (parsedManifest.title && this.store.getSlides().length === 0) {
+          this.store.setProjectTitle(parsedManifest.title);
+        }
+        const ratio = MotionReelImporter.formatToAspectRatio(parsedManifest.aspectRatio);
+        if (ratio && this.store.getSlides().length === 0) {
+          this.store.updateSettings({ aspectRatio: ratio });
+        }
+        this.store.setProjectAiSourceMeta(aiMeta);
+      } else if (inferredDir && !this.store.getProjectAiSourceMeta()?.outputDirPath) {
+        this.store.setProjectAiSourceMeta({
+          ...(this.store.getProjectAiSourceMeta() || {}),
+          outputDirPath: inferredDir,
+        });
+      }
 
       if (newSlides.length > 0 || unpairedVideos.length > 0) {
         this.store.appendBatchSlides(newSlides, unpairedVideos);
@@ -3248,6 +3621,12 @@ export class MotionPresentationApp {
         );
       } else if (report.slidesAdded === 0 && report.transitionsMatched === 0) {
         this.store.notify(t('notify.batchNothingValid'), 'warning');
+      } else if (parsedManifest) {
+        this.store.notify(
+          t('notify.manifestApplied', { count: newSlides.length }),
+          'success',
+          4000
+        );
       } else {
         this.store.notify(
           t('notify.batchImportedSuccess', {
@@ -4980,7 +5359,9 @@ export class MotionPresentationApp {
       mode?: 'replace-all' | 'append' | 'replace-reel';
       targetVideoAssetId?: string;
       initialCuePoints?: number[];
+      initialCueLabels?: string[];
       initialSegmentEasings?: SegmentEasing[];
+      motionReelMeta?: MotionReelMetadata;
       isAlreadyOwnedByStore?: boolean;
     } = {}
   ): void {
@@ -5002,6 +5383,8 @@ export class MotionPresentationApp {
           ? [0, Number((dur / 2).toFixed(2)), Number(dur.toFixed(2))]
           : [0, Number(dur.toFixed(2))];
     cuePoints = SmartPairer.normalizeCuePoints(cuePoints, dur);
+    let cueLabels: string[] = options.initialCueLabels ? [...options.initialCueLabels] : [];
+    const motionReelMeta = options.motionReelMeta;
 
     // Initialize per-segment easing curves
     let segmentEasings: SegmentEasing[] = [];
@@ -5131,6 +5514,25 @@ export class MotionPresentationApp {
                 ${hasAudio ? Icons.volumeOn : Icons.volumeMuted}
                 <span>${hasAudio ? t('reel.audioYes') : t('reel.audioNo')}</span>
               </span>
+              ${
+                motionReelMeta
+                  ? `
+                <span class="reel-audio-pill" style="background: rgba(59,130,246,0.14); color: var(--accent-primary); border-color: rgba(59,130,246,0.3);">
+                  <span>${this.escapeHtml(t('reel.motionReelBadge'))}${motionReelMeta.bpm ? ` · ${Math.round(motionReelMeta.bpm)} BPM` : ''}</span>
+                </span>
+                ${
+                  motionReelMeta.sectionCues.length > 0
+                    ? `<button class="btn btn-xs" id="btn-reel-load-sections" type="button">${this.escapeHtml(t('reel.motionReelSections', { count: motionReelMeta.sectionCues.length }))}</button>`
+                    : ''
+                }
+                ${
+                  motionReelMeta.hitCues.length > 0
+                    ? `<button class="btn btn-xs" id="btn-reel-load-hits" type="button">${this.escapeHtml(t('reel.motionReelHits', { count: motionReelMeta.hitCues.length }))}</button>`
+                    : ''
+                }
+              `
+                  : ''
+              }
             </div>
             <div class="reel-modal-header-trailing">
               ${
@@ -6463,6 +6865,7 @@ export class MotionPresentationApp {
           matchAspectRatio: Boolean(matchRatioChk?.checked),
           preserveMetadata: applyMode === 'replace-reel',
           segmentEasings: [...segmentEasings],
+          cueLabels: cueLabels.length === cuePoints.length ? [...cueLabels] : undefined,
           onProgress: (done, total) => {
             if (isClosed) return;
             const pct = total > 0 ? Math.round((done / total) * 100) : 0;
@@ -6491,6 +6894,40 @@ export class MotionPresentationApp {
             'error'
           );
         }
+      }
+    });
+
+    const applyMotionReelCueSource = (sourceCues: Array<{ timeSec: number; label: string }>) => {
+      if (!sourceCues.length) return;
+      const pts: number[] = [];
+      const labels: string[] = [];
+      const pushUnique = (timeSec: number, label: string) => {
+        const clamped = Math.min(dur, Math.max(0, timeSec));
+        if (!pts.some((p) => Math.abs(p - clamped) < 0.08)) {
+          pts.push(clamped);
+          labels.push(label);
+        }
+      };
+      if (sourceCues[0].timeSec > 0.08) pushUnique(0, 'Start');
+      for (const c of sourceCues) pushUnique(c.timeSec, c.label);
+      if (dur - pts[pts.length - 1] > 0.08) pushUnique(dur, 'End');
+      cuePoints = SmartPairer.normalizeCuePoints(pts, dur);
+      cueLabels = labels;
+      syncEasingsLength();
+      activeCueIdx = 0;
+      selectedCueIndices = new Set([0]);
+      renderAllCueUi();
+    };
+
+    host.querySelector('#btn-reel-load-sections')?.addEventListener('click', () => {
+      if (motionReelMeta?.sectionCues.length) {
+        applyMotionReelCueSource(motionReelMeta.sectionCues);
+      }
+    });
+
+    host.querySelector('#btn-reel-load-hits')?.addEventListener('click', () => {
+      if (motionReelMeta?.hitCues.length) {
+        applyMotionReelCueSource(motionReelMeta.hitCues);
       }
     });
 

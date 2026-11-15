@@ -66,11 +66,29 @@ export interface TransitionSpec {
   easing?: SegmentEasing;
 }
 
+export interface SlideSourceMeta {
+  slideCodeFile?: string;
+  idleLoopCodeFile?: string;
+  transitionCodeFile?: string;
+  renderCommand?: string;
+  exitPointsSec?: number[];
+}
+
+export interface ProjectAiSourceMeta {
+  skillName?: 'new-motion-presentation' | 'create-new' | 'motion-reel';
+  projectRootPath?: string;
+  outputDirPath?: string;
+  creativeDirection?: string;
+}
+
 export interface SlideNode {
   id: string;
   title: string;
   notes: string;
   imageAsset: MediaAsset;
+  idleLoopAsset?: MediaAsset | null;
+  expectedIdleLoopFileName?: string;
+  sourceMeta?: SlideSourceMeta;
   holdDurationSec: number | null; // null = manual advance (click/space/arrow)
   transitionToNext: TransitionSpec;
 }
@@ -113,6 +131,7 @@ export interface PresentationProject {
   slides: SlideNode[];
   settings: PresentationSettings;
   reelMetadata?: ReelMetadata;
+  aiSourceMeta?: ProjectAiSourceMeta;
 }
 
 export type PlaybackPhase =

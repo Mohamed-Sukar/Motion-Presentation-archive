@@ -4,7 +4,9 @@ import {
   MediaKind,
   PresentationProject,
   PresentationSettings,
+  ProjectAiSourceMeta,
   ReelMetadata,
+  SlideSourceMeta,
 } from '../domain/types';
 import { t } from '../i18n';
 
@@ -44,6 +46,12 @@ export interface SerializedSlideData {
   imageArchivePath?: string;
   sourceVideoId?: string;
   sourceTimeSec?: number;
+  idleLoopVideoId?: string;
+  idleLoopFileName?: string | null;
+  idleLoopDurationSec?: number;
+  idleLoopArchivePath?: string;
+  expectedIdleLoopFileName?: string;
+  sourceMeta?: SlideSourceMeta;
   transitionToNext?: SerializedTransitionData;
 }
 
@@ -52,6 +60,7 @@ export interface DeserializedProjectData {
   title: string;
   settings?: Partial<PresentationSettings>;
   reelMetadata?: ReelMetadata;
+  aiSourceMeta?: ProjectAiSourceMeta;
   slidesData: SerializedSlideData[];
 }
 
@@ -107,13 +116,20 @@ export class ProjectSerializer {
       videos?: Map<string, string>;
     }
   ) {
+    const usesV12Features = Boolean(
+      project.aiSourceMeta ||
+        project.slides.some(
+          (s) => s.idleLoopAsset || s.expectedIdleLoopFileName || s.sourceMeta
+        )
+    );
     return {
-      version: '1.1.0',
+      version: usesV12Features ? '1.2.0' : '1.1.0',
       projectId: project.id,
       exportedAt: new Date().toISOString(),
       title: project.title,
       settings: project.settings,
       reelMetadata: project.reelMetadata,
+      aiSourceMeta: project.aiSourceMeta,
       slides: project.slides.map((s, idx) => {
         const embeddedDataUrl =
           embeddedImagesMap?.get(s.imageAsset.id) ||
@@ -133,6 +149,11 @@ export class ProjectSerializer {
         const imageArchivePath = archivePathMap?.images?.get(s.imageAsset.id);
         const videoKey = videoAsset ? this.getAssetDedupKey(videoAsset) : '';
         const videoArchivePath = videoKey ? archivePathMap?.videos?.get(videoKey) : undefined;
+        const idleLoop = s.idleLoopAsset;
+        const idleLoopKey = idleLoop ? this.getAssetDedupKey(idleLoop) : '';
+        const idleLoopArchivePath = idleLoopKey
+          ? archivePathMap?.videos?.get(idleLoopKey)
+          : undefined;
 
         return {
           id: s.id,
@@ -152,6 +173,12 @@ export class ProjectSerializer {
           imageArchivePath,
           sourceVideoId: s.imageAsset.sourceVideoId,
           sourceTimeSec: s.imageAsset.sourceTimeSec,
+          idleLoopVideoId: idleLoop?.id,
+          idleLoopFileName: idleLoop?.name || s.expectedIdleLoopFileName || null,
+          idleLoopDurationSec: idleLoop?.durationSec || 0,
+          idleLoopArchivePath,
+          expectedIdleLoopFileName: s.expectedIdleLoopFileName,
+          sourceMeta: s.sourceMeta,
           transitionToNext: {
             hasCustomVideo,
             videoId: videoAsset?.id,
@@ -203,6 +230,21 @@ export class ProjectSerializer {
           if (bytes && bytes.byteLength > 0) {
             videoCounter += 1;
             const ext = this.sanitizeExtension(vid.name, vid.extension || 'mp4');
+            const entryPath = `assets/videos/video_${String(videoCounter).padStart(3, '0')}.${ext}`;
+            archiveEntries[entryPath] = bytes;
+            videoPaths.set(key, entryPath);
+          }
+        }
+      }
+
+      const loopVid = slide.idleLoopAsset;
+      if (loopVid) {
+        const key = this.getAssetDedupKey(loopVid);
+        if (!videoPaths.has(key)) {
+          const bytes = await this.readAssetBytes(loopVid);
+          if (bytes && bytes.byteLength > 0) {
+            videoCounter += 1;
+            const ext = this.sanitizeExtension(loopVid.name, loopVid.extension || 'mp4');
             const entryPath = `assets/videos/video_${String(videoCounter).padStart(3, '0')}.${ext}`;
             archiveEntries[entryPath] = bytes;
             videoPaths.set(key, entryPath);
@@ -265,6 +307,19 @@ export class ProjectSerializer {
             const fileName = tr.videoFileName || pathBaseName(tr.videoArchivePath);
             videoAssets.set(tr.videoArchivePath, {
               archivePath: tr.videoArchivePath,
+              fileName,
+              mimeType: this.inferMimeType(fileName, 'video'),
+              bytes: entryBytes.slice(),
+            });
+          }
+        }
+
+        if (sd.idleLoopArchivePath && !videoAssets.has(sd.idleLoopArchivePath)) {
+          const entryBytes = entries[sd.idleLoopArchivePath];
+          if (entryBytes && entryBytes.byteLength > 0) {
+            const fileName = sd.idleLoopFileName || pathBaseName(sd.idleLoopArchivePath);
+            videoAssets.set(sd.idleLoopArchivePath, {
+              archivePath: sd.idleLoopArchivePath,
               fileName,
               mimeType: this.inferMimeType(fileName, 'video'),
               bytes: entryBytes.slice(),
@@ -447,8 +502,12 @@ export class ProjectSerializer {
       Array.isArray(data.reelMetadata.cueTimesSec)
         ? (data.reelMetadata as ReelMetadata)
         : undefined;
+    const aiSourceMeta =
+      data.aiSourceMeta && typeof data.aiSourceMeta === 'object'
+        ? (data.aiSourceMeta as ProjectAiSourceMeta)
+        : undefined;
     const slidesData: SerializedSlideData[] = Array.isArray(data.slides) ? data.slides : [];
-    return { projectId, title, settings, reelMetadata, slidesData };
+    return { projectId, title, settings, reelMetadata, aiSourceMeta, slidesData };
   }
 
   static async readProjectFile(file: File): Promise<DeserializedProjectData> {
@@ -501,6 +560,10 @@ export class ProjectSerializer {
         const v = s.transitionToNext?.videoAsset;
         if (v?.rawFile) {
           addRecord(v.rawFile, v.name, v.mimeType || 'video/mp4', 'video');
+        }
+        const loopV = s.idleLoopAsset;
+        if (loopV?.rawFile) {
+          addRecord(loopV.rawFile, loopV.name, loopV.mimeType || 'video/mp4', 'video');
         }
       }
 

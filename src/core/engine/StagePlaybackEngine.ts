@@ -1,6 +1,7 @@
 import {
   EngineStatus,
   FallbackTransitionStyle,
+  MediaAsset,
   PresentationSettings,
   SegmentEasing,
   SlideNode,
@@ -95,9 +96,10 @@ export class StagePlaybackEngine {
   private listeners = new Set<EngineStatusListener>();
   private rafId: number | null = null;
   private activeVideo: HTMLVideoElement | null = null;
+  private activeIdleLoopVideo: HTMLVideoElement | null = null;
+  private idleLoopRafId: number | null = null;
   private activeProceduralTransition: { speedUp: () => void } | null = null;
   private holdTimerId: number | null = null;
-  private preBlackoutPhase: 'HOLDING_SLIDE' | 'IDLE' = 'HOLDING_SLIDE';
   private isTransitionReverse = false;
   private playbackEpoch = 0;
   private loadEpoch = 0;
@@ -214,6 +216,10 @@ export class StagePlaybackEngine {
         if (vid && !uniqueVideoTargets.has(vid.id)) {
           uniqueVideoTargets.set(vid.id, vid.objectUrl);
         }
+        const loopVid = slides[idx]?.idleLoopAsset;
+        if (loopVid && !uniqueVideoTargets.has(`${loopVid.id}__idle`)) {
+          uniqueVideoTargets.set(`${loopVid.id}__idle`, loopVid.objectUrl);
+        }
       }
 
       const totalToWarm = Math.max(1, indicesToWarm.size + uniqueVideoTargets.size);
@@ -246,6 +252,10 @@ export class StagePlaybackEngine {
         const vid = slide.transitionToNext.videoAsset;
         if (vid && !uniqueVideoTargets.has(vid.id)) {
           uniqueVideoTargets.set(vid.id, vid.objectUrl);
+        }
+        const loopVid = slide.idleLoopAsset;
+        if (loopVid && !uniqueVideoTargets.has(`${loopVid.id}__idle`)) {
+          uniqueVideoTargets.set(`${loopVid.id}__idle`, loopVid.objectUrl);
         }
       }
 
@@ -499,7 +509,6 @@ export class StagePlaybackEngine {
       this.enterHoldSlide(this.status.currentSlideIndex);
     } else {
       this.stopCurrentAnimation();
-      this.preBlackoutPhase = 'HOLDING_SLIDE';
       this.ctx.fillStyle = '#000000';
       this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
       this.emitStatus({
@@ -517,7 +526,6 @@ export class StagePlaybackEngine {
       this.enterHoldSlide(this.status.currentSlideIndex);
     } else {
       this.stopCurrentAnimation();
-      this.preBlackoutPhase = 'HOLDING_SLIDE';
       this.ctx.fillStyle = '#ffffff';
       this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
       this.emitStatus({
@@ -590,8 +598,13 @@ export class StagePlaybackEngine {
       this.warmHoldNeighbors(clamped);
     }
 
-    // Check if slide has automatic hold timer
+    // Check if slide has an Idle Motion Loop video to animate during HOLDING_SLIDE
     const slide = this.slides[clamped];
+    if (slide?.idleLoopAsset?.objectUrl) {
+      this.startIdleLoopForSlide(clamped, slide.idleLoopAsset);
+    }
+
+    // Check if slide has automatic hold timer
     if (slide && slide.holdDurationSec && slide.holdDurationSec > 0) {
       this.holdTimerId = window.setTimeout(() => {
         if (
@@ -696,6 +709,12 @@ export class StagePlaybackEngine {
         validVideoIds.add(v.id);
         validVideoUrls.set(v.id, v.objectUrl);
       }
+      const loopV = s.idleLoopAsset;
+      if (loopV) {
+        const loopKey = `${loopV.id}__idle`;
+        validVideoIds.add(loopKey);
+        validVideoUrls.set(loopKey, loopV.objectUrl);
+      }
     }
 
     for (const [imgId, entry] of this.imageCache.entries()) {
@@ -707,7 +726,8 @@ export class StagePlaybackEngine {
     for (const [vidId, entry] of this.videoCache.entries()) {
       if (
         (!validVideoIds.has(vidId) || validVideoUrls.get(vidId) !== entry.url) &&
-        this.activeVideo !== entry.video
+        this.activeVideo !== entry.video &&
+        this.activeIdleLoopVideo !== entry.video
       ) {
         entry.video.pause();
         entry.video.removeAttribute('src');
@@ -727,11 +747,18 @@ export class StagePlaybackEngine {
       if (s?.transitionToNext?.videoAsset) {
         neededVideoAssetIds.add(s.transitionToNext.videoAsset.id);
       }
+      if (s?.idleLoopAsset) {
+        neededVideoAssetIds.add(`${s.idleLoopAsset.id}__idle`);
+      }
     }
 
     // Evict unused video elements to prevent hardware decoder exhaustion
     for (const [vidId, entry] of this.videoCache.entries()) {
-      if (!neededVideoAssetIds.has(vidId) && this.activeVideo !== entry.video) {
+      if (
+        !neededVideoAssetIds.has(vidId) &&
+        this.activeVideo !== entry.video &&
+        this.activeIdleLoopVideo !== entry.video
+      ) {
         entry.video.pause();
         entry.video.removeAttribute('src');
         entry.video.load();
@@ -747,6 +774,12 @@ export class StagePlaybackEngine {
           this.ensureVideoWarmed(
             s.transitionToNext.videoAsset.id,
             s.transitionToNext.videoAsset.objectUrl
+          ).catch(() => {});
+        }
+        if (s.idleLoopAsset) {
+          this.ensureVideoWarmed(
+            `${s.idleLoopAsset.id}__idle`,
+            s.idleLoopAsset.objectUrl
           ).catch(() => {});
         }
       }
@@ -1326,8 +1359,92 @@ export class StagePlaybackEngine {
     this.enterHoldSlide(targetIndex);
   }
 
+  private stopIdleLoop(): void {
+    if (this.idleLoopRafId !== null) {
+      cancelAnimationFrame(this.idleLoopRafId);
+      this.idleLoopRafId = null;
+    }
+    if (this.activeIdleLoopVideo) {
+      this.activeIdleLoopVideo.pause();
+      this.activeIdleLoopVideo = null;
+    }
+  }
+
+  private startIdleLoopForSlide(slideIndex: number, loopAsset: MediaAsset): void {
+    const loopEpoch = this.playbackEpoch;
+    const cacheKey = `${loopAsset.id}__idle`;
+
+    this.ensureVideoWarmed(cacheKey, loopAsset.objectUrl)
+      .then((video) => {
+        if (
+          this.destroyed ||
+          this.playbackEpoch !== loopEpoch ||
+          this.status.phase !== 'HOLDING_SLIDE' ||
+          this.status.currentSlideIndex !== slideIndex
+        ) {
+          return;
+        }
+
+        this.activeIdleLoopVideo = video;
+        video.muted = true;
+        video.loop = true;
+        video.playbackRate = Math.max(0.25, Math.min(4.0, this.settings.globalPlaybackSpeed || 1));
+
+        try {
+          video.currentTime = 0;
+        } catch {
+          // ignore initial seek error
+        }
+
+        const playPromise = typeof video.play === 'function' ? video.play() : undefined;
+        if (playPromise && typeof playPromise.catch === 'function') {
+          playPromise.catch(() => {});
+        }
+
+        if (typeof requestAnimationFrame !== 'function') return;
+
+        const tick = () => {
+          if (
+            this.destroyed ||
+            this.playbackEpoch !== loopEpoch ||
+            this.status.phase !== 'HOLDING_SLIDE' ||
+            this.status.currentSlideIndex !== slideIndex ||
+            this.activeIdleLoopVideo !== video
+          ) {
+            this.idleLoopRafId = null;
+            return;
+          }
+
+          // Early wrap before Chromium's native <video loop> end-of-stream pause hitch
+          const dur = Number.isFinite(video.duration) ? video.duration : 0;
+          if (dur > 0.15 && video.currentTime >= dur - 0.035) {
+            try {
+              video.currentTime = 0;
+            } catch {
+              // ignore seek wrap error
+            }
+          }
+
+          if (video.readyState >= 2) {
+            this.clearStage();
+            this.drawMediaElement(
+              video,
+              video.videoWidth || loopAsset.width || 1920,
+              video.videoHeight || loopAsset.height || 1080
+            );
+          }
+
+          this.idleLoopRafId = requestAnimationFrame(tick);
+        };
+
+        this.idleLoopRafId = requestAnimationFrame(tick);
+      })
+      .catch(() => {});
+  }
+
   private stopCurrentAnimation(): void {
     this.playbackEpoch++;
+    this.stopIdleLoop();
     if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
