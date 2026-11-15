@@ -199,25 +199,51 @@ export class PresentationStore {
     }
   }
 
-  private collectLiveBlobUrls(): Set<string> {
-    const live = new Set<string>();
-    const addFromSlides = (slides: SlideNode[]) => {
-      for (const s of slides) {
-        if (s.imageAsset?.objectUrl?.startsWith('blob:')) {
-          live.add(s.imageAsset.objectUrl);
-        }
-        const vidUrl = s.transitionToNext?.videoAsset?.objectUrl;
-        if (vidUrl?.startsWith('blob:')) {
-          live.add(vidUrl);
-        }
-        const loopUrl = s.idleLoopAsset?.objectUrl;
-        if (loopUrl?.startsWith('blob:')) {
-          live.add(loopUrl);
-        }
+  private collectSlideBlobUrls(slides: SlideNode[], into: Set<string> = new Set()): Set<string> {
+    for (const s of slides) {
+      if (s.imageAsset?.objectUrl?.startsWith('blob:')) {
+        into.add(s.imageAsset.objectUrl);
       }
-    };
-    addFromSlides(this.project.slides);
-    return live;
+      const vidUrl = s.transitionToNext?.videoAsset?.objectUrl;
+      if (vidUrl?.startsWith('blob:')) {
+        into.add(vidUrl);
+      }
+      const loopUrl = s.idleLoopAsset?.objectUrl;
+      if (loopUrl?.startsWith('blob:')) {
+        into.add(loopUrl);
+      }
+    }
+    return into;
+  }
+
+  private collectLiveBlobUrls(): Set<string> {
+    return this.collectSlideBlobUrls(this.project.slides);
+  }
+
+  private collectSnapshotBlobUrls(snapshots: StudioHistorySnapshot[]): string[] {
+    const urls = new Set<string>();
+    for (const snap of snapshots) {
+      this.collectSlideBlobUrls(snap.slides, urls);
+    }
+    return Array.from(urls);
+  }
+
+  private pruneHistoryBlobTracking(droppedSnapshots: StudioHistorySnapshot[]): void {
+    if (droppedSnapshots.length > 0) {
+      this.revokeUrlsIfUnused(this.collectSnapshotBlobUrls(droppedSnapshots));
+    }
+    const stillReferencedInHistory = new Set<string>();
+    for (const snap of this.undoStack) {
+      this.collectSlideBlobUrls(snap.slides, stillReferencedInHistory);
+    }
+    for (const snap of this.redoStack) {
+      this.collectSlideBlobUrls(snap.slides, stillReferencedInHistory);
+    }
+    for (const tracked of Array.from(this.revokedBlobUrls)) {
+      if (!stillReferencedInHistory.has(tracked)) {
+        this.revokedBlobUrls.delete(tracked);
+      }
+    }
   }
 
   private revokeUrlsIfUnused(candidateUrls: Array<string | undefined | null>): void {
@@ -230,16 +256,41 @@ export class PresentationStore {
     }
   }
 
-  private reviveBlobUrlIfRevoked(asset: { objectUrl?: string; file?: File } | null | undefined): void {
+  private reviveBlobUrlIfRevoked(
+    asset:
+      | {
+          objectUrl?: string;
+          thumbnailUrl?: string;
+          lastFrameUrl?: string;
+          rawFile?: File | Blob;
+          file?: File | Blob;
+        }
+      | null
+      | undefined,
+    revivedByOldUrl?: Map<string, string>
+  ): void {
     if (!asset?.objectUrl || !this.revokedBlobUrls.has(asset.objectUrl)) return;
+    const oldUrl = asset.objectUrl;
+    const cachedRevived = revivedByOldUrl?.get(oldUrl);
+    if (cachedRevived) {
+      asset.objectUrl = cachedRevived;
+      if (asset.thumbnailUrl === oldUrl) asset.thumbnailUrl = cachedRevived;
+      if (asset.lastFrameUrl === oldUrl) asset.lastFrameUrl = cachedRevived;
+      return;
+    }
+    const backingBlob = asset.rawFile ?? asset.file;
     if (
-      asset.file &&
+      backingBlob &&
       typeof Blob !== 'undefined' &&
-      asset.file instanceof Blob &&
+      backingBlob instanceof Blob &&
       typeof URL !== 'undefined' &&
       typeof URL.createObjectURL === 'function'
     ) {
-      asset.objectUrl = URL.createObjectURL(asset.file);
+      const nextUrl = URL.createObjectURL(backingBlob);
+      revivedByOldUrl?.set(oldUrl, nextUrl);
+      asset.objectUrl = nextUrl;
+      if (asset.thumbnailUrl === oldUrl) asset.thumbnailUrl = nextUrl;
+      if (asset.lastFrameUrl === oldUrl) asset.lastFrameUrl = nextUrl;
     }
   }
 
@@ -277,14 +328,17 @@ export class PresentationStore {
   }
 
   private applyHistorySnapshot(snap: StudioHistorySnapshot): void {
+    const previousSlideUrls = Array.from(this.collectSlideBlobUrls(this.project.slides));
+    const revivedByOldUrl = new Map<string, string>();
     this.project.title = snap.title;
     this.project.slides = snap.slides.map((s) => {
       const restored = this.cloneSlideForHistory(s);
-      this.reviveBlobUrlIfRevoked(restored.imageAsset);
-      this.reviveBlobUrlIfRevoked(restored.idleLoopAsset);
-      this.reviveBlobUrlIfRevoked(restored.transitionToNext.videoAsset);
+      this.reviveBlobUrlIfRevoked(restored.imageAsset, revivedByOldUrl);
+      this.reviveBlobUrlIfRevoked(restored.idleLoopAsset, revivedByOldUrl);
+      this.reviveBlobUrlIfRevoked(restored.transitionToNext.videoAsset, revivedByOldUrl);
       return restored;
     });
+    this.revokeUrlsIfUnused(previousSlideUrls);
     this.project.reelMetadata = snap.reelMetadata
       ? {
           ...snap.reelMetadata,
@@ -307,11 +361,19 @@ export class PresentationStore {
 
   private recordHistorySnapshot(): void {
     if (this.isRecordingSuppressed) return;
+    const dropped: StudioHistorySnapshot[] = [];
     this.undoStack.push(this.createHistorySnapshot());
     if (this.undoStack.length > this.maxHistoryDepth) {
-      this.undoStack.shift();
+      const shifted = this.undoStack.shift();
+      if (shifted) dropped.push(shifted);
     }
-    this.redoStack = [];
+    if (this.redoStack.length > 0) {
+      dropped.push(...this.redoStack);
+      this.redoStack = [];
+    }
+    if (dropped.length > 0) {
+      this.pruneHistoryBlobTracking(dropped);
+    }
   }
 
   canUndo(): boolean {
@@ -339,8 +401,12 @@ export class PresentationStore {
   }
 
   clearHistory(): void {
+    const dropped = [...this.undoStack, ...this.redoStack];
     this.undoStack = [];
     this.redoStack = [];
+    if (dropped.length > 0) {
+      this.revokeUrlsIfUnused(this.collectSnapshotBlobUrls(dropped));
+    }
     this.revokedBlobUrls.clear();
   }
 

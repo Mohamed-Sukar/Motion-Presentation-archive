@@ -1636,6 +1636,11 @@ console.log('\n[Test 36] Streaming ZIP & mpres:// Protocol Suite (Phase 1)');
 const { runBundleStreamTests } = await import('../test/bundle-stream.test');
 const streamRes = await runSuiteStrict('Streaming ZIP & Protocol (Phase 1)', runBundleStreamTests);
 
+// 8. Phase 2: Memory & Resource Budget Governance Suite
+console.log('\n[Test 37] Memory & Resource Budget Suite (Phase 2)');
+const { runMemoryBudgetTests } = await import('../test/memory-budget.test');
+const memRes = await runSuiteStrict('Memory & Resource Budget (Phase 2)', runMemoryBudgetTests);
+
 console.log('[Test 33] MotionReelImporter native /motion-reel metadata & cue mapping');
 {
   const filmJson = JSON.stringify({
@@ -1842,6 +1847,7 @@ console.log(`[Phase 0] Bundle Compatibility: ${compatRes.passed}/${compatRes.pas
 console.log(`[Phase 1] Atomic Writes: ${atomicRes.passed}/${atomicRes.passed + atomicRes.failed} Passed`);
 console.log(`[Phase 1] Path Registry: ${regRes.passed}/${regRes.passed + regRes.failed} Passed`);
 console.log(`[Phase 1] Streaming ZIP & Protocol: ${streamRes.passed}/${streamRes.passed + streamRes.failed} Passed`);
+console.log(`[Phase 2] Memory & Resource Budget: ${memRes.passed}/${memRes.passed + memRes.failed} Passed`);
 console.log('------------------------------------------------------');
 console.log(`GRAND TOTAL: ${grandTotalPassed}/${grandTotalTests} Passed (${Math.round((grandTotalPassed / grandTotalTests) * 100)}%)`);
 console.log('======================================================\n');
