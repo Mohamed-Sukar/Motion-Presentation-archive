@@ -5,7 +5,7 @@ import { ComponentScope, escapeHtml } from '../core/ComponentLifecycle';
 import { Icons } from '../icons';
 
 export type SurgicalAiScope = 'slide' | 'idle-loop' | 'transition' | 'project';
-export type SurgicalAiSkill = 'new-motion-presentation' | 'create-new';
+export type SurgicalAiSkill = 'new-motion-presentation' | 'animate-slides' | 'create-new';
 
 export interface SurgicalAiPromptRenderProps {
   activeSlide: SlideNode;
@@ -28,7 +28,9 @@ export interface SurgicalAiPromptWireCallbacks {
 
 export function renderSurgicalAiPromptMarkup(props: SurgicalAiPromptRenderProps): string {
   const skillName: SurgicalAiSkill =
-    props.aiMeta?.skillName === 'create-new' ? 'create-new' : 'new-motion-presentation';
+    props.aiMeta?.skillName === 'animate-slides' || props.aiMeta?.skillName === 'create-new'
+      ? 'animate-slides'
+      : 'new-motion-presentation';
   const scope: SurgicalAiScope = props.scopeOverride ?? props.defaultScope;
   const outputDirPath = props.aiMeta?.outputDirPath || props.aiMeta?.projectRootPath || '';
   const lang = getLanguage();
@@ -92,7 +94,7 @@ export function renderSurgicalAiPromptMarkup(props: SurgicalAiPromptRenderProps)
           <label class="prop-label" for="insp-ai-skill">${escapeHtml(t('inspector.aiSkillLabel'))}</label>
           <select class="select-field" id="insp-ai-skill">
             <option value="new-motion-presentation" ${skillName === 'new-motion-presentation' ? 'selected' : ''}>/new-motion-presentation</option>
-            <option value="create-new" ${skillName === 'create-new' ? 'selected' : ''}>/create-new</option>
+            <option value="animate-slides" ${skillName === 'animate-slides' ? 'selected' : ''}>/animate-slides</option>
           </select>
         </div>
       </div>

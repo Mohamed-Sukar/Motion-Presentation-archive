@@ -76,7 +76,7 @@ export function renderEmptyStageView(
                 <span class="welcome-action-sub">${escapeHtml(t('toolbar.importMediaTitle'))}</span>
               </span>
             </span>
-            <kbd class="kbd-badge">Ctrl+I</kbd>
+            <kbd class="kbd-badge">Ctrl+Shift+I</kbd>
           </button>
 
           <button type="button" class="welcome-action-row" id="btn-empty-reel">
@@ -214,7 +214,7 @@ export function renderEmptyStageView(
             </div>
             <div class="welcome-recent-info">
               <div class="welcome-recent-title-line">
-                <span class="welcome-recent-name">${escapeHtml(entry.title)}</span>
+                <span class="welcome-recent-name" dir="auto">${escapeHtml(entry.title)}</span>
                 ${entry.pinned ? `<span class="welcome-pin-badge" title="${escapeHtml(t('welcome.unpin'))}">${Icons.pin}</span>` : ''}
               </div>
               <div class="welcome-recent-meta">

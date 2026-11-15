@@ -58,6 +58,14 @@ import {
 } from '../core/i18n';
 import { PresentationStore, StoreChangeType } from '../core/state/PresentationStore';
 import { ComponentScope, escapeHtml } from './core/ComponentLifecycle';
+import { LayerStack } from './core/LayerStack';
+import {
+  computeLayoutPlan,
+  computeStageFrameSize,
+  FocusPaneTab,
+  LayoutPlan,
+} from './layout/LayoutGovernor';
+import type { PresenterWindowPayload, SerializedBlobAsset } from './components/PresenterWindowApp';
 import {
   renderWindowToolbarView,
   syncToolbarUndoRedoState as syncToolbarUndoRedoView,
@@ -117,6 +125,56 @@ declare global {
       setFullScreen: (flag: boolean) => Promise<boolean>;
       isFullScreen: () => Promise<boolean>;
       setWindowTitle?: (title: string) => Promise<void>;
+      getWindowState?: () => Promise<{
+        mode: string;
+        isFullScreen: boolean;
+        isMaximized: boolean;
+        isMinimized: boolean;
+        zoomFactor: number;
+        presenterOpen?: boolean;
+        presenterDisplayId?: number | null;
+      }>;
+      onWindowState?: (
+        callback: (state: {
+          mode: string;
+          isFullScreen: boolean;
+          isMaximized: boolean;
+          isMinimized: boolean;
+          zoomFactor: number;
+          presenterOpen?: boolean;
+          presenterDisplayId?: number | null;
+        }) => void
+      ) => () => void;
+      setZoomFactor?: (factor: number) => Promise<number>;
+      stepZoom?: (direction: number) => Promise<number>;
+      resetZoom?: () => Promise<number>;
+      getDisplays?: () => Promise<
+        Array<{
+          id: number;
+          label: string;
+          isPrimary: boolean;
+          isStudioDisplay: boolean;
+        }>
+      >;
+      reloadStudio?: () => Promise<boolean>;
+      openPresenterWindow?: (payload: PresenterWindowPayload) => Promise<{
+        ok: boolean;
+        displayId: number | null;
+        dualDisplay: boolean;
+      }>;
+      closePresenterWindow?: () => Promise<boolean>;
+      setPresenterDisplay?: (displayId: number | null) => Promise<{ ok: boolean; displayId: number | null }>;
+      sendPresenterCommand?: (command: { type: string; slideIndex?: number }) => Promise<boolean>;
+      onPresenterStatus?: (
+        callback: (status: {
+          slideIndex: number;
+          totalSlides?: number;
+          phase?: string;
+          isBlank?: boolean;
+          open?: boolean;
+        }) => void
+      ) => () => void;
+      onPresenterClosed?: (callback: (info: { slideIndex?: number }) => void) => () => void;
       getAppVersion?: () => Promise<string>;
       getSystemLocale?: () => Promise<'ar' | 'en'>;
       setLanguage?: (lang: 'ar' | 'en') => Promise<'ar' | 'en'>;
@@ -242,6 +300,19 @@ export class MotionPresentationApp {
   private readonly modalScope = this.rootScope.createChildScope();
   private readonly workspaceModalScope = this.rootScope.createChildScope();
   private readonly stagePopoverScope = this.rootScope.createChildScope();
+  private readonly layerStack = new LayerStack();
+  private currentZoomFactor = 1.0;
+  private lastLayoutPlan: LayoutPlan | null = null;
+  private focusPaneTab: FocusPaneTab = 'stage';
+  private resizeRafId: number | null = null;
+  private presentEpoch = 0;
+  private isPresenterEnteringWindow = false;
+  private isDedicatedPresenterOpen = false;
+  private presenterConsoleStatus: {
+    slideIndex: number;
+    totalSlides: number;
+    isBlank?: boolean;
+  } | null = null;
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -260,6 +331,7 @@ export class MotionPresentationApp {
     this.applyPanelWidths(false);
     this.bindPaneResizers();
     this.bindViewportResizeSync();
+    this.bindDesktopWindowSync();
     this.bindGlobalShortcuts();
     this.bindNativeMenuCommands();
     this.bindDesktopProjectOpenEvents();
@@ -271,6 +343,10 @@ export class MotionPresentationApp {
   }
 
   public dispose(): void {
+    if (this.resizeRafId !== null) {
+      cancelAnimationFrame(this.resizeRafId);
+      this.resizeRafId = null;
+    }
     this.activeModalClose?.();
     this.closeStageSettingsPopover();
     this.closeSlideContextMenu();
@@ -280,6 +356,10 @@ export class MotionPresentationApp {
     this.rootScope.dispose();
     this.previewEngine?.destroy?.();
     this.presenterEngine?.destroy?.();
+    if (this.isDedicatedPresenterOpen) {
+      void window.desktopAPI?.closePresenterWindow?.();
+      this.isDedicatedPresenterOpen = false;
+    }
   }
 
   private async syncDesktopLanguageAndLocale(initialLang: AppLanguage): Promise<void> {
@@ -456,26 +536,84 @@ export class MotionPresentationApp {
     if (!splitView) return;
 
     const rect = splitView.getBoundingClientRect?.();
-    const splitW = rect?.width || 0;
-    const splitH = rect?.height || 0;
+    const vw = window?.innerWidth || 1280;
+    const vh = window?.innerHeight || 720;
+    const splitW = rect?.width && rect.width > 0 ? rect.width : vw;
+    const splitH = rect?.height && rect.height > 0 ? rect.height : Math.max(240, vh - 44);
     const slides = this.store.getSlides();
 
     if (slides.length === 0) {
       this.isInspectorOverlayMode = false;
-      splitView.classList.remove('is-inspector-overlay', 'is-compact-height', 'is-compact-width');
+      splitView.classList.remove(
+        'is-inspector-overlay',
+        'is-inspector-sheet',
+        'is-focus-mode',
+        'is-compact-height',
+        'is-compact-width'
+      );
+      splitView.removeAttribute('data-focus-tab');
+      const focusBar = this.root.querySelector('#focus-mode-bar') as HTMLElement | null;
+      if (focusBar) focusBar.style.display = 'none';
+      const emptyPlan = computeLayoutPlan({
+        viewportWidth: vw,
+        viewportHeight: vh,
+        isRtl: isRtlLanguage(),
+        requestedSequenceMode: 'collapsed',
+        requestedNavigatorOpen: false,
+        requestedInspectorOpen: false,
+        floatingSequenceSize: { width: 620, height: 176 },
+        inspectorWidth: this.inspectorWidth,
+        previousFocusMode: this.lastLayoutPlan?.focusMode,
+        previousToolbarTier: this.lastLayoutPlan?.toolbarTier,
+      });
+      if (this.lastLayoutPlan?.toolbarTier !== emptyPlan.toolbarTier) {
+        this.lastLayoutPlan = emptyPlan;
+        const toolbar = this.root.querySelector('#window-toolbar') as HTMLElement | null;
+        if (toolbar) toolbar.dataset.toolbarTier = emptyPlan.toolbarTier;
+      } else {
+        this.lastLayoutPlan = emptyPlan;
+      }
       return;
     }
 
     const effectiveSeq = this.resolveEffectiveSequenceMode(splitW, splitH);
-    const shouldShowSideNav = effectiveSeq === 'side';
-    const shouldShowBottomDock = effectiveSeq === 'bottom';
+    const plan = computeLayoutPlan({
+      viewportWidth: vw,
+      viewportHeight: vh,
+      isRtl: isRtlLanguage(),
+      requestedSequenceMode: effectiveSeq === 'bottom' ? 'docked' : 'collapsed',
+      requestedNavigatorOpen: effectiveSeq === 'side',
+      requestedInspectorOpen: this.isInspectorVisible,
+      floatingSequenceSize: { width: 620, height: 176 },
+      inspectorWidth: this.inspectorWidth,
+      previousFocusMode: this.lastLayoutPlan?.focusMode,
+      previousToolbarTier: this.lastLayoutPlan?.toolbarTier,
+    });
+    const prevToolbarTier = this.lastLayoutPlan?.toolbarTier;
+    this.lastLayoutPlan = plan;
 
-    this.isNavigatorVisible = shouldShowSideNav;
+    if (plan.focusMode) {
+      splitView.classList.add('is-focus-mode');
+      splitView.setAttribute('data-focus-tab', this.focusPaneTab);
+      this.renderFocusModeBar(true);
+    } else {
+      splitView.classList.remove('is-focus-mode');
+      splitView.removeAttribute('data-focus-tab');
+      this.focusPaneTab = 'stage';
+      this.renderFocusModeBar(false);
+    }
+
+    const shouldShowSideNav = plan.focusMode
+      ? this.focusPaneTab === 'slides'
+      : effectiveSeq === 'side';
+    const shouldShowBottomDock = !plan.focusMode && effectiveSeq === 'bottom';
+
+    this.isNavigatorVisible = effectiveSeq === 'side' && !plan.focusMode;
 
     const navPane = this.root.querySelector('#navigator-pane') as HTMLElement | null;
     const navResizer = this.root.querySelector('#navigator-resizer') as HTMLElement | null;
     navPane?.classList.toggle('collapsed', !shouldShowSideNav);
-    navResizer?.classList.toggle('collapsed', !shouldShowSideNav);
+    navResizer?.classList.toggle('collapsed', plan.focusMode || !shouldShowSideNav);
 
     const dock = this.root.querySelector('#studio-timeline-dock') as HTMLElement | null;
     if (dock) {
@@ -490,22 +628,98 @@ export class MotionPresentationApp {
     splitView.classList.toggle('is-compact-width', compactWidth);
     stagePane?.classList.toggle('is-compact-height', compactHeight);
 
+    const toolbar = this.root.querySelector('#window-toolbar') as HTMLElement | null;
+    if (toolbar) {
+      toolbar.dataset.toolbarTier = plan.toolbarTier;
+    } else if (prevToolbarTier && prevToolbarTier !== plan.toolbarTier) {
+      this.renderWindowToolbar();
+    }
+
     const restoreBtn = this.root.querySelector('#btn-stage-show-sequence') as HTMLElement | null;
     if (restoreBtn) {
-      restoreBtn.style.display = effectiveSeq === 'hidden' ? 'inline-flex' : 'none';
+      restoreBtn.style.display = !plan.focusMode && effectiveSeq === 'hidden' ? 'inline-flex' : 'none';
     }
+  }
+
+  private renderFocusModeBar(visible: boolean): void {
+    const bar = this.root.querySelector('#focus-mode-bar') as HTMLElement | null;
+    if (!bar) return;
+    if (!visible) {
+      bar.style.display = 'none';
+      return;
+    }
+    bar.style.display = 'flex';
+    const tabs: Array<{ id: FocusPaneTab; label: string }> = [
+      { id: 'stage', label: t('focus.tabStage') },
+      { id: 'slides', label: t('focus.tabSlides') },
+      { id: 'inspector', label: t('focus.tabInspector') },
+    ];
+    bar.innerHTML = `
+      <div class="focus-mode-segmented" role="tablist">
+        ${tabs
+          .map(
+            (tab) => `<button
+              type="button"
+              role="tab"
+              aria-selected="${this.focusPaneTab === tab.id ? 'true' : 'false'}"
+              class="focus-mode-tab ${this.focusPaneTab === tab.id ? 'active' : ''}"
+              data-focus-tab-btn="${tab.id}"
+            >${this.escapeHtml(tab.label)}</button>`
+          )
+          .join('')}
+      </div>
+    `;
+    bar.querySelectorAll('[data-focus-tab-btn]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const nextTab = (btn as HTMLElement).dataset.focusTabBtn as FocusPaneTab | undefined;
+        if (nextTab) {
+          this.setFocusPaneTab(nextTab);
+        }
+      });
+    });
+  }
+
+  private setFocusPaneTab(tab: FocusPaneTab): void {
+    this.focusPaneTab = tab;
+    const splitView = this.root.querySelector('.split-view') as HTMLElement | null;
+    splitView?.setAttribute('data-focus-tab', tab);
+    if (tab === 'inspector') {
+      this.isInspectorVisible = true;
+      this.root.querySelector('#inspector-pane')?.classList.remove('collapsed');
+      this.renderInspectorPane();
+    } else if (tab === 'slides') {
+      this.renderNavigatorPane();
+    }
+    this.reconcileWorkspaceLayout();
+    this.applyPanelWidths(false);
+    this.updateCanvasFrameDimensions(this.store.getSettings());
   }
 
   private getResponsivePanelWidths(splitView: HTMLElement | null): {
     navigatorWidth: number;
     inspectorWidth: number;
     overlayInspector: boolean;
+    sheetInspector: boolean;
   } {
     let navW = this.navigatorWidth;
     let inspW = this.inspectorWidth;
     let overlayInspector = false;
+    let sheetInspector = false;
 
     const splitWidth = splitView?.getBoundingClientRect?.().width || 0;
+    const vw = window?.innerWidth || splitWidth || 1280;
+    const vh = window?.innerHeight || 720;
+    const focusMode = Boolean(this.lastLayoutPlan?.focusMode);
+
+    if (focusMode) {
+      return {
+        navigatorWidth: navW,
+        inspectorWidth: Math.min(vw, 480),
+        overlayInspector: this.focusPaneTab === 'inspector',
+        sheetInspector: this.focusPaneTab === 'inspector',
+      };
+    }
+
     if (splitWidth > 0 && !splitView?.classList.contains('is-deck-empty')) {
       const compactW = splitWidth < 760;
       const railWidth = compactW ? 0 : 42;
@@ -520,6 +734,7 @@ export class MotionPresentationApp {
       if (activeNav + activeInsp > budget) {
         if (this.isInspectorVisible && activeNav + this.minInspectorWidth > budget) {
           overlayInspector = true;
+          sheetInspector = vh <= 600;
           inspW = Math.min(inspW, Math.max(240, splitWidth - 48));
         }
 
@@ -539,7 +754,7 @@ export class MotionPresentationApp {
       }
     }
 
-    return { navigatorWidth: navW, inspectorWidth: inspW, overlayInspector };
+    return { navigatorWidth: navW, inspectorWidth: inspW, overlayInspector, sheetInspector };
   }
 
   private applyPanelWidths(persist = false): void {
@@ -552,10 +767,17 @@ export class MotionPresentationApp {
       splitView.style?.setProperty?.('--navigator-width', `${effective.navigatorWidth}px`);
       splitView.style?.setProperty?.('--inspector-width', `${effective.inspectorWidth}px`);
       splitView.classList.toggle('is-inspector-overlay', effective.overlayInspector);
+      splitView.classList.toggle('is-inspector-sheet', effective.sheetInspector);
     }
 
     const inspPane = this.root.querySelector('#inspector-pane') as HTMLElement | null;
     inspPane?.classList.toggle('is-overlay-drawer', effective.overlayInspector);
+    inspPane?.classList.toggle('is-sheet-drawer', effective.sheetInspector);
+    if (this.lastLayoutPlan?.focusMode) {
+      inspPane?.classList.toggle('collapsed', this.focusPaneTab !== 'inspector');
+    } else {
+      inspPane?.classList.toggle('collapsed', !this.isInspectorVisible);
+    }
 
     const navResizer = this.root.querySelector('#navigator-resizer') as HTMLElement | null;
     if (navResizer) {
@@ -578,6 +800,18 @@ export class MotionPresentationApp {
     }
   }
 
+  private scheduleViewportResize(): void {
+    if (typeof requestAnimationFrame !== 'function') {
+      this.handleViewportResize();
+      return;
+    }
+    if (this.resizeRafId !== null) return;
+    this.resizeRafId = requestAnimationFrame(() => {
+      this.resizeRafId = null;
+      this.handleViewportResize();
+    });
+  }
+
   private handleViewportResize(): void {
     this.reconcileWorkspaceLayout();
     this.applyPanelWidths(false);
@@ -587,19 +821,69 @@ export class MotionPresentationApp {
 
   private bindViewportResizeSync(): void {
     this.rootScope.listen(window, 'resize', () => {
-      this.handleViewportResize();
+      this.scheduleViewportResize();
     });
 
     if (typeof ResizeObserver !== 'undefined') {
       const areaEl = this.root.querySelector('.stage-canvas-area') as HTMLElement | null;
       const splitView = this.root.querySelector('.split-view') as HTMLElement | null;
       const observer = new ResizeObserver(() => {
-        this.handleViewportResize();
+        this.scheduleViewportResize();
       });
       if (areaEl) observer.observe(areaEl);
       if (splitView) observer.observe(splitView);
       this.rootScope.addCleanup(() => observer.disconnect());
     }
+  }
+
+  private bindDesktopWindowSync(): void {
+    const api = window.desktopAPI;
+    if (!api) return;
+
+    void api.getWindowState?.()?.then?.((state) => {
+      if (state && typeof state.zoomFactor === 'number') {
+        this.currentZoomFactor = state.zoomFactor;
+        this.renderWindowToolbar();
+      }
+    }).catch?.(() => {});
+
+    const unsubState = api.onWindowState?.((state) => {
+      if (!state) return;
+      if (typeof state.zoomFactor === 'number' && Math.abs(state.zoomFactor - this.currentZoomFactor) > 0.005) {
+        this.currentZoomFactor = state.zoomFactor;
+        this.renderWindowToolbar();
+        this.scheduleViewportResize();
+      }
+      if (
+        this.isPresentingFullscreen &&
+        !this.isDedicatedPresenterOpen &&
+        !this.isPresenterEnteringWindow &&
+        !state.isFullScreen
+      ) {
+        void this.exitFullscreenPresentation();
+      }
+    });
+    if (unsubState) this.rootScope.addCleanup(unsubState);
+
+    const unsubStatus = api.onPresenterStatus?.((status) => {
+      if (!status) return;
+      this.presenterConsoleStatus = {
+        slideIndex: status.slideIndex ?? 0,
+        totalSlides: status.totalSlides ?? this.store.getSlides().length,
+        isBlank: status.isBlank,
+      };
+      if (this.isDedicatedPresenterOpen) {
+        this.renderPresenterConsoleBanner();
+      }
+    });
+    if (unsubStatus) this.rootScope.addCleanup(unsubStatus);
+
+    const unsubClosed = api.onPresenterClosed?.((info) => {
+      if (!this.isDedicatedPresenterOpen) return;
+      const lastIdx = typeof info?.slideIndex === 'number' ? info.slideIndex : 0;
+      void this.handleDedicatedPresenterClosed(lastIdx);
+    });
+    if (unsubClosed) this.rootScope.addCleanup(unsubClosed);
   }
 
   private bindPaneResizers(): void {
@@ -851,6 +1135,8 @@ export class MotionPresentationApp {
           tabindex="0"
         ></div>
         <section class="stage-pane" id="stage-pane" aria-label="${this.escapeHtml(t('shell.stageAria'))}">
+          <div class="focus-mode-bar" id="focus-mode-bar" style="display:none;"></div>
+          <div class="presenter-console-banner hidden" id="presenter-console-banner" role="region"></div>
           <div class="stage-canvas-area">
             <div class="stage-canvas-frame" id="canvas-frame">
               <canvas class="stage-canvas" id="preview-canvas"></canvas>
@@ -1019,18 +1305,32 @@ export class MotionPresentationApp {
         const cs = window.getComputedStyle(areaEl);
         const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
         const padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
-        const availW = Math.max(120, rect.width - padX);
-        const availH = Math.max(90, rect.height - padY);
-        const fitW = Math.floor(Math.min(availW, availH * r.num));
-        const fitH = Math.floor(fitW / r.num);
-        frameEl.style.width = `${fitW}px`;
-        frameEl.style.height = `${fitH}px`;
+        const sized = computeStageFrameSize({
+          containerWidth: rect.width,
+          containerHeight: rect.height,
+          aspectRatio: r.num,
+          padHorizontal: padX,
+          padVertical: padY,
+          hudReservedPx: 0,
+          fillRatio: 1,
+        });
+        frameEl.style.width = `${sized.width}px`;
+        frameEl.style.height = `${sized.height}px`;
         return;
       }
     }
 
-    frameEl.style.width = `min(100%, calc((100vh - 240px) * ${r.num}))`;
-    frameEl.style.height = 'auto';
+    const fallbackPlan = this.lastLayoutPlan;
+    const safeW = fallbackPlan?.stageSafeWidth ?? Math.max(240, (window?.innerWidth || 1280) - 320);
+    const safeH = fallbackPlan?.stageSafeHeight ?? Math.max(180, (window?.innerHeight || 720) - 180);
+    const sized = computeStageFrameSize({
+      containerWidth: safeW,
+      containerHeight: safeH,
+      aspectRatio: r.num,
+      hudReservedPx: 64,
+    });
+    frameEl.style.width = `${sized.width}px`;
+    frameEl.style.height = `${sized.height}px`;
   }
 
   private syncMultiSelectBar(): void {
@@ -1169,6 +1469,9 @@ export class MotionPresentationApp {
         canRedo: this.store.canRedo?.() ?? false,
         themeIcon: this.getThemeIcon(themePref),
         themePref,
+        zoomFactor: this.currentZoomFactor,
+        toolbarTier: this.lastLayoutPlan?.toolbarTier || 'full',
+        focusMode: Boolean(this.lastLayoutPlan?.focusMode),
       },
       {
         onProjectTitleChange: (title) => this.store.setProjectTitle(title),
@@ -1212,6 +1515,9 @@ export class MotionPresentationApp {
         onToggleLanguage: () => this.toggleLanguage(),
         onOpenStageSettings: (anchorEl) => this.toggleStageSettingsPopover(anchorEl),
         onOpenMoreMenu: (anchorEl) => this.openToolbarMoreMenu(anchorEl),
+        onResetZoom: () => {
+          void window.desktopAPI?.resetZoom?.();
+        },
         onStartFullscreen: () => {
           void this.enterFullscreenPresentation(this.latestEngineStatus?.currentSlideIndex || 0);
         },
@@ -1221,16 +1527,135 @@ export class MotionPresentationApp {
 
   private openToolbarMoreMenu(anchorEl: HTMLElement): void {
     const hasSlides = this.store.getSlides().length > 0;
+    const tier = this.lastLayoutPlan?.toolbarTier || 'full';
+    const isCompactOrMinimal = tier === 'compact' || tier === 'minimal';
+    const isMinimal = tier === 'minimal';
+    const overflowItems: Parameters<typeof openAppleMenu>[0]['items'] = [];
+
+    if (isMinimal) {
+      overflowItems.push(
+        {
+          label: t('toolbar.importMedia'),
+          icon: Icons.folderImport,
+          shortcut: 'Ctrl+Shift+I',
+          onSelect: () => {
+            void this.handleImportMedia();
+          },
+        },
+        {
+          label: t('toolbar.reelWorkflow'),
+          icon: Icons.filmTransition,
+          shortcut: 'Ctrl+R',
+          onSelect: () => {
+            void this.handleOpenReelWorkflow();
+          },
+        },
+        {
+          label: t('toolbar.addSlide'),
+          icon: Icons.photoPlus,
+          onSelect: () => {
+            const input = this.root.querySelector('#single-image-input') as HTMLInputElement | null;
+            if (input) {
+              input.dataset.replaceSlideId = '';
+              input.click();
+            }
+          },
+        },
+        {
+          label: t('toolbar.stageRatio'),
+          icon: Icons.ratio,
+          onSelect: () => this.toggleStageSettingsPopover(anchorEl),
+        }
+      );
+    }
+
+    if (isCompactOrMinimal) {
+      overflowItems.push(
+        {
+          label: t('toolbar.undoTitle'),
+          icon: Icons.undo,
+          shortcut: 'Ctrl+Z',
+          disabled: !(this.store.canUndo?.() ?? false),
+          separatorBefore: isMinimal,
+          onSelect: () => {
+            if (this.store.undo()) {
+              this.store.notify(t('notify.undoDone'), 'info', 2000);
+            }
+          },
+        },
+        {
+          label: t('toolbar.redoTitle'),
+          icon: Icons.redo,
+          shortcut: 'Ctrl+Y',
+          disabled: !(this.store.canRedo?.() ?? false),
+          onSelect: () => {
+            if (this.store.redo()) {
+              this.store.notify(t('notify.redoDone'), 'info', 2000);
+            }
+          },
+        }
+      );
+    }
+
+    if (isMinimal) {
+      overflowItems.push(
+        {
+          label: t('toolbar.themeToggleTitle'),
+          icon: this.getThemeIcon(getThemePreference()),
+          separatorBefore: true,
+          onSelect: () => this.toggleTheme(),
+        },
+        {
+          label: t('toolbar.langToggleTitle'),
+          icon: Icons.globe,
+          onSelect: () => this.toggleLanguage(),
+        }
+      );
+    }
+
+    const zoomItems: Parameters<typeof openAppleMenu>[0]['items'] = window.desktopAPI?.stepZoom
+      ? [
+          {
+            label: t('zoom.inTitle'),
+            icon: Icons.plus,
+            shortcut: 'Ctrl+=',
+            separatorBefore: true,
+            onSelect: () => {
+              void window.desktopAPI?.stepZoom?.(1);
+            },
+          },
+          {
+            label: t('zoom.outTitle'),
+            icon: Icons.chevronDown,
+            shortcut: 'Ctrl+-',
+            onSelect: () => {
+              void window.desktopAPI?.stepZoom?.(-1);
+            },
+          },
+          {
+            label: t('zoom.resetMenu'),
+            icon: Icons.replay,
+            shortcut: 'Ctrl+0',
+            disabled: Math.round(this.currentZoomFactor * 100) === 100,
+            onSelect: () => {
+              void window.desktopAPI?.resetZoom?.();
+            },
+          },
+        ]
+      : [];
+
     openAppleMenu({
       anchorEl,
       align: 'end',
       minWidth: 246,
       ariaLabel: t('toolbar.moreActions'),
       items: [
+        ...overflowItems,
         {
           label: t('toolbar.saveProject'),
           icon: Icons.exportDoc,
           shortcut: 'Ctrl+S',
+          separatorBefore: overflowItems.length > 0,
           disabled: !hasSlides,
           onSelect: () => {
             void this.handleSaveProject(false);
@@ -1281,6 +1706,7 @@ export class MotionPresentationApp {
           shortcut: 'Ctrl+K',
           onSelect: () => this.openCommandPalette(),
         },
+        ...zoomItems,
         {
           label: t('toolbar.about'),
           icon: Icons.info,
@@ -1522,11 +1948,19 @@ export class MotionPresentationApp {
   }
 
   private toggleNavigatorPane(): void {
+    if (this.lastLayoutPlan?.focusMode) {
+      this.setFocusPaneTab(this.focusPaneTab === 'slides' ? 'stage' : 'slides');
+      return;
+    }
     const nextPref: SequenceLayoutPreference = this.isNavigatorVisible ? 'bottom' : 'side';
     this.setSequenceLayoutPreference(nextPref);
   }
 
   private toggleInspectorPane(): void {
+    if (this.lastLayoutPlan?.focusMode) {
+      this.setFocusPaneTab(this.focusPaneTab === 'inspector' ? 'stage' : 'inspector');
+      return;
+    }
     this.isInspectorVisible = !this.isInspectorVisible;
     const inspPane = this.root.querySelector('#inspector-pane');
     inspPane?.classList.toggle('collapsed', !this.isInspectorVisible);
@@ -2231,7 +2665,7 @@ export class MotionPresentationApp {
               </div>
             </div>
             <div class="slide-caption-row">
-              <span class="slide-caption-title">${this.escapeHtml(slide.title)}</span>
+              <span class="slide-caption-title" dir="auto">${this.escapeHtml(slide.title)}</span>
               ${slide.notes && slide.notes.trim().length > 0 ? `<span class="slide-notes-badge" title="${this.escapeHtml(t('nav.hasNotesTitle'))}">${Icons.notes}</span>` : ''}
               <span class="slide-caption-meta">${slide.holdDurationSec ? `${slide.holdDurationSec}s` : ''}</span>
             </div>
@@ -2906,6 +3340,7 @@ export class MotionPresentationApp {
               type="text"
               class="input-field"
               id="insp-slide-title"
+              dir="auto"
               value="${this.escapeHtml(activeSlide.title)}"
             />
           </div>
@@ -2949,6 +3384,7 @@ export class MotionPresentationApp {
             <textarea
               class="textarea-field"
               id="insp-slide-notes"
+              dir="auto"
               rows="3"
               placeholder="${this.escapeHtml(t('inspector.notesPlaceholder'))}"
             >${this.escapeHtml(activeSlide.notes || '')}</textarea>
@@ -3569,6 +4005,11 @@ export class MotionPresentationApp {
     const container = this.root.querySelector('#toast-container') as HTMLElement;
     if (!container) return;
 
+    if (this.layerStack.shouldSuppressToasts()) {
+      container.innerHTML = '';
+      return;
+    }
+
     const note = this.store.getNotification();
     if (!note) {
       container.innerHTML = '';
@@ -4088,10 +4529,83 @@ export class MotionPresentationApp {
     const slides = this.store.getSlides();
     if (slides.length === 0 || this.isPresentingFullscreen) return;
 
+    const myEpoch = ++this.presentEpoch;
+    this.activeModalClose?.();
+    this.closeStageSettingsPopover();
+    this.closeSlideContextMenu();
+    closeActiveAppleMenu();
+
     // Pause studio preview engine to avoid dual hardware decoding and resource contention
     this.previewEngine.pause();
 
     this.isPresentingFullscreen = true;
+    this.layerStack.setPresenting(true);
+    this.renderToast();
+
+    // Multi-window / dual-display dedicated presenter path when running inside Electron desktop shell
+    if (typeof window.desktopAPI?.openPresenterWindow === 'function') {
+      try {
+        const blobAssets: Record<string, SerializedBlobAsset> = {};
+        const captureBlob = async (asset: MediaAsset | null | undefined) => {
+          if (!asset || !asset.objectUrl?.startsWith('blob:') || !asset.rawFile || blobAssets[asset.id]) {
+            return;
+          }
+          const buffer = await asset.rawFile.arrayBuffer();
+          blobAssets[asset.id] = {
+            buffer,
+            mimeType: asset.mimeType || asset.rawFile.type || 'application/octet-stream',
+            name: asset.name,
+          };
+        };
+
+        for (const s of slides) {
+          await captureBlob(s.imageAsset);
+          await captureBlob(s.idleLoopAsset);
+          await captureBlob(s.transitionToNext?.videoAsset);
+        }
+
+        if (myEpoch !== this.presentEpoch || !this.isPresentingFullscreen) return;
+
+        const payload: PresenterWindowPayload = {
+          slides: slides.map((s) => ({
+            ...s,
+            imageAsset: { ...s.imageAsset, rawFile: undefined },
+            idleLoopAsset: s.idleLoopAsset ? { ...s.idleLoopAsset, rawFile: undefined } : s.idleLoopAsset,
+            transitionToNext: {
+              ...s.transitionToNext,
+              videoAsset: s.transitionToNext?.videoAsset
+                ? { ...s.transitionToNext.videoAsset, rawFile: undefined }
+                : null,
+            },
+          })),
+          settings: this.store.getSettings(),
+          startSlideIndex: startIndex,
+          language: getLanguage(),
+          theme: document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark',
+          blobAssets,
+        };
+
+        const res = await window.desktopAPI.openPresenterWindow(payload);
+        if (myEpoch !== this.presentEpoch || !this.isPresentingFullscreen) {
+          await window.desktopAPI.closePresenterWindow?.();
+          return;
+        }
+        if (res?.ok) {
+          this.isDedicatedPresenterOpen = true;
+          this.presenterConsoleStatus = {
+            slideIndex: startIndex,
+            totalSlides: slides.length,
+            isBlank: false,
+          };
+          this.renderPresenterConsoleBanner();
+          return;
+        }
+      } catch {
+        // Fall through seamlessly to hardened in-page fullscreen presenter if dedicated window open fails
+      }
+    }
+
+    this.isPresenterEnteringWindow = true;
     this.isSlideGridOpen = false;
     this.isLaserPointerActive = false;
     this.isPresenterNotesOpen = false;
@@ -4108,9 +4622,16 @@ export class MotionPresentationApp {
 
     const fsRoot = this.root.querySelector('#fullscreen-root') as HTMLElement;
     const settings = this.store.getSettings();
+    const ratioNumMap: Record<AspectRatioOption, number> = {
+      '16:9': 16 / 9,
+      '16:10': 16 / 10,
+      '4:3': 4 / 3,
+      '9:16': 9 / 16,
+    };
+    const numericRatio = ratioNumMap[settings.aspectRatio] || 16 / 9;
 
     fsRoot.innerHTML = `
-      <div class="fullscreen-presenter" id="fs-presenter">
+      <div class="fullscreen-presenter" id="fs-presenter" style="--presenter-aspect-ratio:${numericRatio};">
         <div class="presenter-top-progress" id="fs-top-progress" style="${settings.showPresenterHud === 'hidden' ? 'display:none;' : ''}">
           <div class="presenter-top-progress-bar" id="fs-top-bar" style="width:0%"></div>
         </div>
@@ -4141,15 +4662,15 @@ export class MotionPresentationApp {
         </div>
         <div class="presenter-notes-drawer hidden" id="fs-notes-drawer" role="region" aria-label="${this.escapeHtml(t('presenter.notesDrawerAria'))}">
           <div class="presenter-notes-header">
-            <span class="presenter-notes-title" id="fs-notes-slide-title">${t('presenter.notesHeader')}</span>
+            <span class="presenter-notes-title" id="fs-notes-slide-title" dir="auto">${t('presenter.notesHeader')}</span>
             <div class="presenter-notes-controls">
               <button class="btn btn-xs" id="fs-notes-font-dec" type="button" title="${this.escapeHtml(t('presenter.notesFontDec'))}">A-</button>
               <button class="btn btn-xs" id="fs-notes-font-inc" type="button" title="${this.escapeHtml(t('presenter.notesFontInc'))}">A+</button>
               <button class="btn btn-xs" id="fs-notes-close" type="button" title="${this.escapeHtml(t('presenter.closeShortcut'))}">${Icons.close}</button>
             </div>
           </div>
-          <div class="presenter-notes-body" id="fs-notes-body" style="font-size:${this.presenterNotesFontSize}px;"></div>
-          <div class="presenter-notes-footer" id="fs-notes-next-slide"></div>
+          <div class="presenter-notes-body" id="fs-notes-body" dir="auto" style="font-size:${this.presenterNotesFontSize}px;"></div>
+          <div class="presenter-notes-footer" id="fs-notes-next-slide" dir="auto"></div>
         </div>
         <div id="fs-grid-host"></div>
       </div>
@@ -4166,6 +4687,10 @@ export class MotionPresentationApp {
     });
 
     await this.presenterEngine.loadProject(slides, settings, startIndex);
+    if (myEpoch !== this.presentEpoch || !this.isPresentingFullscreen || !this.presenterOverlayEl) {
+      this.isPresenterEnteringWindow = false;
+      return;
+    }
 
     try {
       if (window.desktopAPI?.setFullScreen) {
@@ -4175,6 +4700,12 @@ export class MotionPresentationApp {
       }
     } catch {
       // Fallback to maximized overlay
+    } finally {
+      this.isPresenterEnteringWindow = false;
+    }
+
+    if (myEpoch !== this.presentEpoch || !this.isPresentingFullscreen || !this.presenterOverlayEl) {
+      return;
     }
 
     fsCanvas.addEventListener('click', () => {
@@ -4519,11 +5050,89 @@ export class MotionPresentationApp {
     }
   }
 
+  private renderPresenterConsoleBanner(): void {
+    const banner = this.root.querySelector('#presenter-console-banner') as HTMLElement | null;
+    if (!banner) return;
+    if (!this.isDedicatedPresenterOpen) {
+      banner.classList.add('hidden');
+      banner.innerHTML = '';
+      return;
+    }
+
+    const st = this.presenterConsoleStatus || {
+      slideIndex: 0,
+      totalSlides: this.store.getSlides().length,
+      isBlank: false,
+    };
+    const slideNum = `${st.slideIndex + 1} / ${Math.max(1, st.totalSlides)}`;
+
+    banner.classList.remove('hidden');
+    banner.innerHTML = `
+      <div class="presenter-console-info">
+        <span class="presenter-console-dot"></span>
+        <div>
+          <div class="presenter-console-title">${this.escapeHtml(t('presenter.consoleActiveTitle'))} · <span class="tabular-nums">${slideNum}</span></div>
+          <div class="presenter-console-sub">${this.escapeHtml(t('presenter.consoleSubtitle'))}</div>
+        </div>
+      </div>
+      <div class="presenter-console-actions">
+        <button type="button" class="btn btn-xs" id="btn-pc-prev">${Icons.chevronLeft}</button>
+        <button type="button" class="btn btn-xs" id="btn-pc-next">${Icons.chevronRight}</button>
+        <button type="button" class="btn btn-xs ${st.isBlank ? 'active-pane' : ''}" id="btn-pc-blank">${this.escapeHtml(t('presenter.consoleBlackoutBtn'))}</button>
+        <button type="button" class="btn btn-xs btn-destructive" id="btn-pc-end">${this.escapeHtml(t('presenter.consoleEndBtn'))}</button>
+      </div>
+    `;
+
+    banner.querySelector('#btn-pc-prev')?.addEventListener('click', () => {
+      void window.desktopAPI?.sendPresenterCommand?.({ type: 'prev' });
+    });
+    banner.querySelector('#btn-pc-next')?.addEventListener('click', () => {
+      void window.desktopAPI?.sendPresenterCommand?.({ type: 'next' });
+    });
+    banner.querySelector('#btn-pc-blank')?.addEventListener('click', () => {
+      void window.desktopAPI?.sendPresenterCommand?.({ type: 'toggle-blank' });
+    });
+    banner.querySelector('#btn-pc-end')?.addEventListener('click', () => {
+      void this.exitFullscreenPresentation();
+    });
+  }
+
+  private async handleDedicatedPresenterClosed(lastIdx: number): Promise<void> {
+    if (!this.isDedicatedPresenterOpen && !this.isPresentingFullscreen) return;
+    ++this.presentEpoch;
+    this.isDedicatedPresenterOpen = false;
+    this.isPresentingFullscreen = false;
+    this.presenterConsoleStatus = null;
+    this.layerStack.setPresenting(false);
+    this.renderPresenterConsoleBanner();
+    this.renderToast();
+
+    const safeIdx = Math.max(0, Math.min(lastIdx, Math.max(0, this.store.getSlides().length - 1)));
+    this.store.setActivePreviewIndex(safeIdx);
+    const slide = this.store.getSlideByIndex(safeIdx);
+    if (slide) {
+      this.store.setSelection({ type: 'slide', slideId: slide.id });
+    }
+    this.syncNavigatorActiveSlide(safeIdx);
+    await this.previewEngine.jumpToSlide(safeIdx, true);
+  }
+
   private async exitFullscreenPresentation(): Promise<void> {
     if (!this.isPresentingFullscreen) return;
+    ++this.presentEpoch;
+    this.isPresenterEnteringWindow = false;
+
+    if (this.isDedicatedPresenterOpen) {
+      const lastIdx = this.presenterConsoleStatus?.slideIndex ?? 0;
+      await window.desktopAPI?.closePresenterWindow?.();
+      await this.handleDedicatedPresenterClosed(lastIdx);
+      return;
+    }
+
     const lastIdx = this.presenterEngine?.getStatus().currentSlideIndex ?? 0;
 
     this.isPresentingFullscreen = false;
+    this.layerStack.setPresenting(false);
     this.isSlideGridOpen = false;
     this.isLaserPointerActive = false;
     this.isPresenterNotesOpen = false;
@@ -4567,6 +5176,7 @@ export class MotionPresentationApp {
       this.store.setSelection({ type: 'slide', slideId: slide.id });
     }
     this.syncNavigatorActiveSlide(lastIdx);
+    this.renderToast();
     await this.previewEngine.jumpToSlide(lastIdx, true);
   }
 
@@ -4667,6 +5277,12 @@ export class MotionPresentationApp {
    * ========================================================================= */
   private bindNativeMenuCommands(): void {
     window.desktopAPI?.onMenuCommand?.((cmd) => {
+      if (this.isPresentingFullscreen && !this.isDedicatedPresenterOpen) {
+        if (cmd === 'start-presentation') {
+          return;
+        }
+        return;
+      }
       switch (cmd) {
         case 'import-media':
           this.handleImportMedia();
@@ -4731,49 +5347,89 @@ export class MotionPresentationApp {
         return;
       }
 
+      if (this.isPresentingFullscreen && !this.isDedicatedPresenterOpen) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          if (this.isSlideGridOpen) {
+            this.togglePresenterSlideGrid();
+          } else if (this.slideNumberBuffer.length > 0) {
+            this.clearSlideNumberBuffer();
+          } else if (this.isLaserPointerActive) {
+            this.setLaserPointer(false);
+          } else {
+            this.exitFullscreenPresentation();
+          }
+          return;
+        }
+
+        // Block studio chrome shortcuts while presenting fullscreen
+        if (
+          (e.ctrlKey || e.metaKey) &&
+          ['1', 'i', 'o', 's', 'k', 'r', 'd', 'z', 'y'].includes(e.key.toLowerCase())
+        ) {
+          e.preventDefault();
+          return;
+        }
+      } else {
+        const target = e.target as HTMLElement;
+        const isInputFocused =
+          target &&
+          (target.tagName === 'INPUT' ||
+            target.tagName === 'TEXTAREA' ||
+            target.tagName === 'SELECT');
+
+        // Native style pane and action shortcuts
+        if ((e.ctrlKey || e.metaKey) && e.key === '1') {
+          e.preventDefault();
+          this.toggleNavigatorPane();
+          return;
+        }
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'i') {
+          e.preventDefault();
+          void this.handleImportMedia();
+          return;
+        }
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'i' || e.key === 'I')) {
+          e.preventDefault();
+          this.toggleInspectorPane();
+          return;
+        }
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'o' || e.key === 'O')) {
+          e.preventDefault();
+          this.handleOpenProject();
+          return;
+        }
+        if ((e.ctrlKey || e.metaKey) && !isInputFocused && (e.key === 'r' || e.key === 'R')) {
+          e.preventDefault();
+          void this.handleOpenReelWorkflow();
+          return;
+        }
+        if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+          e.preventDefault();
+          void this.handleSaveProject(e.shiftKey);
+          return;
+        }
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+          e.preventDefault();
+          this.openCommandPalette();
+          return;
+        }
+
+        if (e.key === 'F5') {
+          e.preventDefault();
+          this.enterFullscreenPresentation(
+            this.latestEngineStatus?.currentSlideIndex || 0
+          );
+          return;
+        }
+      }
+
       const target = e.target as HTMLElement;
       const isInputFocused =
         target &&
         (target.tagName === 'INPUT' ||
           target.tagName === 'TEXTAREA' ||
           target.tagName === 'SELECT');
-
-      // Native style pane and action shortcuts
-      if ((e.ctrlKey || e.metaKey) && e.key === '1') {
-        e.preventDefault();
-        this.toggleNavigatorPane();
-        return;
-      }
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'i' || e.key === 'I')) {
-        e.preventDefault();
-        this.toggleInspectorPane();
-        return;
-      }
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'o' || e.key === 'O')) {
-        e.preventDefault();
-        this.handleOpenProject();
-        return;
-      }
-      if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
-        e.preventDefault();
-        void this.handleSaveProject(e.shiftKey);
-        return;
-      }
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
-        e.preventDefault();
-        this.openCommandPalette();
-        return;
-      }
-
-      if (e.key === 'F5') {
-        e.preventDefault();
-        if (!this.isPresentingFullscreen) {
-          this.enterFullscreenPresentation(
-            this.latestEngineStatus?.currentSlideIndex || 0
-          );
-        }
-        return;
-      }
 
       if (this.isPresentingFullscreen) {
         if (e.key === 'Escape') {

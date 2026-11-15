@@ -1,6 +1,7 @@
 import { isRtlLanguage, t } from '../../core/i18n';
 import { ComponentScope, escapeHtml } from '../core/ComponentLifecycle';
 import { Icons } from '../icons';
+import type { ToolbarTier } from '../layout/LayoutGovernor';
 import { getResolvedTheme, getThemePreference, ThemePreference } from '../theme';
 
 export interface ToolbarRenderState {
@@ -14,6 +15,9 @@ export interface ToolbarRenderState {
   canRedo: boolean;
   themeIcon: string;
   themePref: ThemePreference;
+  zoomFactor?: number;
+  toolbarTier?: ToolbarTier;
+  focusMode?: boolean;
 }
 
 export interface ToolbarCallbacks {
@@ -34,6 +38,7 @@ export interface ToolbarCallbacks {
   onToggleLanguage: () => void;
   onOpenStageSettings?: (anchorEl: HTMLElement) => void;
   onOpenMoreMenu?: (anchorEl: HTMLElement) => void;
+  onResetZoom?: () => void;
   onStartFullscreen: () => void;
 }
 
@@ -51,6 +56,9 @@ export function renderWindowToolbarView(
   const navIcon = rtl ? Icons.sidebarRight : Icons.sidebarLeft;
   const inspIcon = rtl ? Icons.sidebarLeft : Icons.sidebarRight;
   const themeTitle = `${t('toolbar.themeToggleTitle')} (${t(`theme.${state.themePref}`)})`;
+  const zoomPct = Math.round((state.zoomFactor ?? 1) * 100);
+  const showZoomChip = zoomPct !== 100;
+  toolbar.dataset.toolbarTier = state.toolbarTier || 'full';
 
   toolbar.innerHTML = `
     <div class="toolbar-group-leading">
@@ -69,6 +77,7 @@ export function renderWindowToolbarView(
           type="text"
           class="doc-title-input"
           id="project-title-input"
+          dir="auto"
           value="${escapeHtml(state.projectTitle)}"
           aria-label="${escapeHtml(t('toolbar.projectTitleAria'))}"
           placeholder="${escapeHtml(t('toolbar.projectTitlePlaceholder'))}"
@@ -134,6 +143,17 @@ export function renderWindowToolbarView(
     </div>
 
     <div class="toolbar-group-trailing">
+      ${
+        showZoomChip
+          ? `<button
+              type="button"
+              class="btn btn-toolbar zoom-reset-chip tabular-nums"
+              id="btn-zoom-reset-chip"
+              title="${escapeHtml(t('zoom.chipTitle'))}"
+              aria-label="${escapeHtml(t('zoom.chipTitle'))}"
+            >${escapeHtml(t('zoom.chipLabel', { pct: zoomPct }))}</button>`
+          : ''
+      }
       <button
         class="btn btn-toolbar btn-cmd-trigger"
         id="btn-command-palette"
@@ -221,6 +241,7 @@ export function renderWindowToolbarView(
     e.stopPropagation();
     if (moreBtn) callbacks.onOpenMoreMenu?.(moreBtn);
   });
+  scope.listen(toolbar.querySelector('#btn-zoom-reset-chip'), 'click', () => callbacks.onResetZoom?.());
   scope.listen(toolbar.querySelector('#btn-start-fullscreen'), 'click', callbacks.onStartFullscreen);
 }
 

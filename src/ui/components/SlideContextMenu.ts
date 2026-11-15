@@ -110,6 +110,18 @@ export function openSlideContextMenuView(
     </div>
   `;
 
+  const menuEl = host.querySelector('#studio-context-menu') as HTMLElement | null;
+  if (menuEl) {
+    const rect = menuEl.getBoundingClientRect?.();
+    const measuredW = Math.max(200, Math.round(rect?.width || menuW));
+    const measuredH = Math.max(180, Math.round(rect?.height || 296));
+    const clampedLeft = Math.max(8, Math.min(rawLeft, vw - measuredW - 8));
+    const clampedTop = Math.max(8, Math.min(clientY, vh - measuredH - 8));
+    menuEl.style.left = `${clampedLeft}px`;
+    menuEl.style.top = `${clampedTop}px`;
+    menuEl.style.maxHeight = `${Math.max(160, vh - 16)}px`;
+  }
+
   const close = () => {
     closeSlideContextMenuView(host, scope);
   };

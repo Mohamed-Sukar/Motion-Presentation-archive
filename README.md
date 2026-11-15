@@ -42,17 +42,21 @@ Motion Presentation Studio eliminates the black frames, lag, and video-switching
 
 ---
 
-## 🤖 Included Agent Skill (`.agents/skills/create-new`)
+## Included Agent Skills (`.agents/skills/`)
 
-This repository includes the project-specific **`create-new`** skill in [`.agents/skills/create-new`](.agents/skills/create-new/SKILL.md) (along with [`inspect_frames.mjs`](.agents/skills/create-new/scripts/inspect_frames.mjs)). It automates turning an ordered folder of presentation frames into 2D-code-drawn canvases and frame-to-frame motion transition videos ready for Motion Presentation Studio.
+This repository includes native agent workflow skills tailored for motion presentation workflows:
+- **`animate-slides`** in [`.agents/skills/animate-slides`](.agents/skills/animate-slides/SKILL.md) (along with [`inspect_frames.mjs`](.agents/skills/animate-slides/scripts/inspect_frames.mjs)): Automates turning an ordered sequence of user slide frames into 2D-code-drawn canvases and frame-to-frame motion transition videos.
+- **`new-motion-presentation`** in [`.agents/skills/new-motion-presentation`](.agents/skills/new-motion-presentation/SKILL.md): Creates high-creativity presentations from scratch with Rest-Pose Idle Loops (`XX_loop.mp4`), kinetic transitions, and native `presentation.json` metadata for surgical AI editing.
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```text
 app/
-├── .agents/skills/create-new/   # Custom agent workflow skill for generating motion transitions
+├── .agents/skills/
+│   ├── animate-slides/          # Workflow skill for generating motion transitions from slides
+│   └── new-motion-presentation/ # High-creativity workflow for presentations from scratch
 ├── electron/                    # Electron main process, preload bridge, and CLI argv helper
 ├── src/
 │   ├── core/
@@ -70,7 +74,7 @@ app/
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 - **Node.js** `18+` (with `npm`)
@@ -96,7 +100,7 @@ npm run build && npm run electron:dev
 
 ---
 
-## 🧪 Testing & Building
+## Testing & Building
 
 Run the full verification suite (184 automated tests across unit, pairwise, and E2E tiers):
 

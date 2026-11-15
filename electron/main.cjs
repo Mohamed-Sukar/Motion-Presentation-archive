@@ -10,6 +10,15 @@ const {
 } = require('./lib/pathRegistry.cjs');
 const { writeAtomic, writeBufferAtomic } = require('./lib/atomicWrite.cjs');
 const { indexBundle } = require('./lib/bundleIndex.cjs');
+const {
+  clampZoomFactor,
+  stepZoomFactor,
+  computeScaledMinSize,
+  clampWindowBoundsToWorkArea,
+  resolveBoundsForDisplays,
+  shouldPersistBounds,
+  choosePresenterDisplay,
+} = require('./lib/windowController.cjs');
 const { writeBundleToFile } = require('./lib/bundleWriter.cjs');
 const {
   setCacheBaseDir,
@@ -37,9 +46,18 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 let mainWindow = null;
+let presenterWindow = null;
+let pendingPresenterPayload = null;
+let presenterDisplayId = null;
+let presenterLastSlideIndex = 0;
 let rendererReady = false;
 let pendingProjectFilePath = null;
 let currentMenuLanguage = null;
+let currentZoomFactor = 1.0;
+let prePresentationMode = 'normal';
+let isPresentingFullscreenInStudio = false;
+let lastKnownNormalBounds = null;
+let unresponsiveDialogOpen = false;
 
 function resolveSystemLanguage() {
   try {
@@ -97,6 +115,13 @@ const MENU_TEXT = {
     help: 'مساعدة',
     shortcuts: 'اختصارات لوحة المفاتيح',
     about: 'حول Motion Presentation Studio',
+    recoveryTitle: 'توقّف عارض الاستوديو',
+    recoverySubtitle: 'تعرّض محرك العرض لعطل غير متوقع. يمكنك إعادة تحميل الاستوديو بأمان.',
+    recoveryReload: 'إعادة تحميل الاستوديو',
+    unresponsiveTitle: 'الاستوديو لا يستجيب',
+    unresponsiveMessage: 'توقفت النافذة عن الاستجابة مؤقتاً. هل تريد الانتظار أم إعادة التحميل؟',
+    unresponsiveWait: 'انتظار',
+    unresponsiveReload: 'إعادة التحميل',
   },
   en: {
     file: 'File',
@@ -136,6 +161,13 @@ const MENU_TEXT = {
     help: 'Help',
     shortcuts: 'Keyboard Shortcuts',
     about: 'About Motion Presentation Studio',
+    recoveryTitle: 'Studio View Crashed',
+    recoverySubtitle: 'The renderer process encountered an unexpected interruption. You can reload Studio safely.',
+    recoveryReload: 'Reload Studio',
+    unresponsiveTitle: 'Studio Window Unresponsive',
+    unresponsiveMessage: 'The window stopped responding temporarily. Wait for it or reload Studio?',
+    unresponsiveWait: 'Wait',
+    unresponsiveReload: 'Reload',
   },
 };
 
@@ -242,8 +274,12 @@ async function enqueueOrSendProjectFile(filePath) {
   pendingProjectFilePath = filePath;
 }
 
+function getMenuLabels(lang = getActiveLanguage()) {
+  return MENU_TEXT[lang === 'en' ? 'en' : 'ar'];
+}
+
 function buildNativeMenu(lang = getActiveLanguage()) {
-  const L = MENU_TEXT[lang === 'en' ? 'en' : 'ar'];
+  const L = getMenuLabels(lang);
   const sendCommand = (cmd) => {
     if (mainWindow && mainWindow.webContents) {
       mainWindow.webContents.send('menu:command', cmd);
@@ -330,9 +366,21 @@ function buildNativeMenu(lang = getActiveLanguage()) {
           click: () => sendCommand('start-presentation'),
         },
         { type: 'separator' },
-        { role: 'resetZoom', label: L.resetZoom },
-        { role: 'zoomIn', label: L.zoomIn },
-        { role: 'zoomOut', label: L.zoomOut },
+        {
+          label: L.resetZoom,
+          accelerator: 'CmdOrCtrl+0',
+          click: () => applyStudioZoom(1.0),
+        },
+        {
+          label: L.zoomIn,
+          accelerator: 'CmdOrCtrl+=',
+          click: () => applyStudioZoom(stepZoomFactor(currentZoomFactor, 1)),
+        },
+        {
+          label: L.zoomOut,
+          accelerator: 'CmdOrCtrl+-',
+          click: () => applyStudioZoom(stepZoomFactor(currentZoomFactor, -1)),
+        },
         { type: 'separator' },
         { role: 'togglefullscreen', label: L.toggleFullscreen },
       ],
@@ -358,127 +406,272 @@ function buildNativeMenu(lang = getActiveLanguage()) {
   Menu.setApplicationMenu(menu);
 }
 
-const WINDOW_MIN_WIDTH = 720;
-const WINDOW_MIN_HEIGHT = 500;
-
 function getWindowStatePath() {
   return path.join(app.getPath('userData'), 'window-state.json');
 }
 
-function resolveInitialWindowState() {
-  const primaryWorkArea = screen.getPrimaryDisplay().workArea;
-  const defaultWidth = Math.min(
-    1360,
-    Math.max(WINDOW_MIN_WIDTH, Math.round(primaryWorkArea.width * 0.88))
-  );
-  const defaultHeight = Math.min(
-    840,
-    Math.max(WINDOW_MIN_HEIGHT, Math.round(primaryWorkArea.height * 0.88))
-  );
-  const fallback = {
-    width: defaultWidth,
-    height: defaultHeight,
-    isMaximized: false,
-  };
+function getAppStartUrl(queryParams = '') {
+  const devUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5175';
+  const distIndex = path.join(__dirname, '..', 'dist', 'index.html');
+  if (fs.existsSync(distIndex) && !process.env.VITE_DEV_SERVER_URL) {
+    return { type: 'file', target: distIndex, search: queryParams };
+  }
+  const suffix = queryParams ? `?${queryParams.replace(/^\?/, '')}` : '';
+  return { type: 'url', target: `${devUrl}${suffix}` };
+}
 
+function loadAppEntry(win, queryParams = '') {
+  const entry = getAppStartUrl(queryParams);
+  if (entry.type === 'file') {
+    const query = queryParams ? Object.fromEntries(new URLSearchParams(queryParams)) : undefined;
+    return win.loadFile(entry.target, query ? { query } : undefined);
+  }
+  return win.loadURL(entry.target);
+}
+
+function getCurrentWindowMode(win) {
+  if (!win || win.isDestroyed()) return 'normal';
+  if (win.isFullScreen()) return 'fullscreen';
+  if (win.isMinimized()) return 'minimized';
+  if (win.isMaximized()) return 'maximized';
+  return 'normal';
+}
+
+function getWindowStateSnapshot(win = mainWindow) {
+  if (!win || win.isDestroyed()) {
+    return {
+      mode: 'normal',
+      isFullScreen: false,
+      isMaximized: false,
+      isMinimized: false,
+      zoomFactor: currentZoomFactor,
+      presenterOpen: Boolean(presenterWindow && !presenterWindow.isDestroyed()),
+      presenterDisplayId,
+    };
+  }
+  const isFullScreen = win.isFullScreen();
+  const isMaximized = win.isMaximized();
+  const isMinimized = win.isMinimized();
+  return {
+    mode: getCurrentWindowMode(win),
+    isFullScreen,
+    isMaximized,
+    isMinimized,
+    zoomFactor: currentZoomFactor,
+    presenterOpen: Boolean(presenterWindow && !presenterWindow.isDestroyed()),
+    presenterDisplayId,
+  };
+}
+
+function emitWindowState(win = mainWindow) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    win.webContents.send('window:state', getWindowStateSnapshot(win));
+  } catch {
+    // Ignore send errors when webContents is tearing down
+  }
+}
+
+function resolveInitialWindowState() {
+  const displays = screen.getAllDisplays();
+  const primaryDisplay = screen.getPrimaryDisplay();
+  let savedState;
   try {
     const raw = fs.readFileSync(getWindowStatePath(), 'utf-8');
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return fallback;
+    savedState = JSON.parse(raw);
+  } catch {
+    savedState = null;
+  }
+  return resolveBoundsForDisplays({ savedState, displays, primaryDisplay });
+}
 
-    const width = Math.max(
-      WINDOW_MIN_WIDTH,
-      Math.min(primaryWorkArea.width, Math.round(Number(parsed.width) || defaultWidth))
-    );
-    const height = Math.max(
-      WINDOW_MIN_HEIGHT,
-      Math.min(primaryWorkArea.height, Math.round(Number(parsed.height) || defaultHeight))
-    );
-    const isMaximized = Boolean(parsed.isMaximized);
+function persistWindowStateNow(win) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    const isMaximized = win.isMaximized();
+    const canSampleBounds = shouldPersistBounds({
+      isDestroyed: win.isDestroyed(),
+      isFullScreen: win.isFullScreen(),
+      isMinimized: win.isMinimized(),
+      isPresenting: isPresentingFullscreenInStudio,
+    });
 
-    const hasCoords = Number.isFinite(parsed.x) && Number.isFinite(parsed.y);
-    if (hasCoords) {
-      const candidate = {
-        x: Math.round(parsed.x),
-        y: Math.round(parsed.y),
-        width,
-        height,
-      };
-      const isVisible = screen.getAllDisplays().some((d) => {
-        const wa = d.workArea;
-        return (
-          candidate.x + 80 > wa.x &&
-          candidate.x < wa.x + wa.width - 80 &&
-          candidate.y + 40 > wa.y &&
-          candidate.y < wa.y + wa.height - 40
-        );
-      });
-      if (isVisible) {
-        return { ...candidate, isMaximized };
+    if (canSampleBounds) {
+      const bounds = isMaximized ? win.getNormalBounds() : win.getBounds();
+      if (bounds && bounds.width > 0 && bounds.height > 0) {
+        lastKnownNormalBounds = { ...bounds };
       }
     }
 
-    return { width, height, isMaximized };
+    const boundsToWrite =
+      lastKnownNormalBounds ||
+      (!win.isFullScreen() && !win.isMinimized()
+        ? isMaximized
+          ? win.getNormalBounds()
+          : win.getBounds()
+        : null);
+    if (!boundsToWrite) return;
+
+    const currentMode = win.isFullScreen() || isPresentingFullscreenInStudio ? prePresentationMode : isMaximized ? 'maximized' : 'normal';
+    const display = screen.getDisplayMatching(boundsToWrite);
+    const payload = {
+      x: Math.round(boundsToWrite.x),
+      y: Math.round(boundsToWrite.y),
+      width: Math.round(boundsToWrite.width),
+      height: Math.round(boundsToWrite.height),
+      mode: currentMode === 'maximized' ? 'maximized' : 'normal',
+      isMaximized: currentMode === 'maximized',
+      displayId: display ? display.id : null,
+      zoomFactor: currentZoomFactor,
+    };
+    writeAtomic(getWindowStatePath(), JSON.stringify(payload, null, 2));
   } catch {
-    return fallback;
+    // Ignore non-critical window-state write errors
   }
+}
+
+function applyStudioZoom(nextZoom, win = mainWindow) {
+  const clamped = clampZoomFactor(nextZoom);
+  currentZoomFactor = clamped;
+  if (win && !win.isDestroyed()) {
+    try {
+      win.webContents.setZoomFactor(clamped);
+    } catch {
+      // Ignore during teardown
+    }
+    const { minWidth, minHeight } = computeScaledMinSize(clamped);
+    try {
+      win.setMinimumSize(minWidth, minHeight);
+      if (!win.isMaximized() && !win.isFullScreen()) {
+        const currentBounds = win.getBounds();
+        const display = screen.getDisplayMatching(currentBounds);
+        const clampedBounds = clampWindowBoundsToWorkArea(
+          currentBounds,
+          display.workArea,
+          { width: minWidth, height: minHeight }
+        );
+        if (
+          clampedBounds.x !== currentBounds.x ||
+          clampedBounds.y !== currentBounds.y ||
+          clampedBounds.width !== currentBounds.width ||
+          clampedBounds.height !== currentBounds.height
+        ) {
+          win.setBounds(clampedBounds);
+        }
+      }
+    } catch {
+      // Ignore bounds resize failures on minimized/hidden windows
+    }
+    persistWindowStateNow(win);
+    emitWindowState(win);
+  }
+  return clamped;
+}
+
+function renderRecoveryPage(win, reasonDetail = '') {
+  if (!win || win.isDestroyed()) return;
+  const L = getMenuLabels();
+  const safeReason = String(reasonDetail || '').replace(/[<>&"]/g, '');
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+    body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0c0d10;color:#f4f4f6;font-family:system-ui,-apple-system,sans-serif;padding:24px;box-sizing:border-box;}
+    .card{max-width:460px;width:100%;background:#16181f;border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:24px;text-align:center;}
+    h2{margin:0 0 10px;font-size:18px;} p{margin:0 0 18px;font-size:13px;color:rgba(244,244,246,0.72);line-height:1.5;}
+    code{display:block;margin:0 0 16px;font-size:11px;color:#ff8a80;word-break:break-word;}
+    button{background:#0a84ff;color:#fff;border:none;border-radius:10px;padding:10px 18px;font-size:13px;font-weight:600;cursor:pointer;}
+  </style></head><body><div class="card"><h2>${L.recoveryTitle}</h2><p>${L.recoverySubtitle}</p>${safeReason ? `<code>${safeReason}</code>` : ''}<button onclick="window.location.href=window.location.href">${L.recoveryReload}</button></div></body></html>`;
+  void win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
 }
 
 function bindWindowStatePersistence(win) {
   let saveTimer = null;
 
-  const persistNow = () => {
-    if (!win || win.isDestroyed()) return;
-    try {
-      const isMaximized = win.isMaximized();
-      const bounds = isMaximized ? win.getNormalBounds() : win.getBounds();
-      const payload = {
-        x: bounds.x,
-        y: bounds.y,
-        width: bounds.width,
-        height: bounds.height,
-        isMaximized,
-      };
-      fs.writeFileSync(getWindowStatePath(), JSON.stringify(payload), 'utf-8');
-    } catch {
-      // Ignore non-critical window-state write errors
-    }
-  };
-
   const scheduleSave = () => {
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       saveTimer = null;
-      persistNow();
+      persistWindowStateNow(win);
     }, 250);
   };
 
   win.on('resize', scheduleSave);
   win.on('move', scheduleSave);
-  win.on('maximize', persistNow);
-  win.on('unmaximize', persistNow);
+  win.on('maximize', () => {
+    persistWindowStateNow(win);
+    emitWindowState(win);
+  });
+  win.on('unmaximize', () => {
+    persistWindowStateNow(win);
+    emitWindowState(win);
+  });
+  win.on('minimize', () => {
+    emitWindowState(win);
+  });
+  win.on('restore', () => {
+    emitWindowState(win);
+  });
+  win.on('enter-full-screen', () => {
+    emitWindowState(win);
+  });
+  win.on('leave-full-screen', () => {
+    isPresentingFullscreenInStudio = false;
+    emitWindowState(win);
+  });
   win.on('close', () => {
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
     }
-    persistNow();
+    persistWindowStateNow(win);
+    if (presenterWindow && !presenterWindow.isDestroyed()) {
+      presenterWindow.close();
+    }
   });
+}
+
+function ensureWindowOnValidDisplay(win = mainWindow) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    const displays = screen.getAllDisplays();
+    const primaryDisplay = screen.getPrimaryDisplay();
+    const minSize = computeScaledMinSize(currentZoomFactor);
+    const rawBounds = win.isMaximized() ? win.getNormalBounds() : win.getBounds();
+    const matched = screen.getDisplayMatching(rawBounds);
+    const targetDisplay = displays.find((d) => matched && d.id === matched.id) || primaryDisplay;
+    const nextBounds = clampWindowBoundsToWorkArea(rawBounds, targetDisplay.workArea, {
+      width: minSize.minWidth,
+      height: minSize.minHeight,
+    });
+    if (!win.isMaximized() && !win.isFullScreen()) {
+      win.setBounds(nextBounds);
+    } else {
+      lastKnownNormalBounds = { ...nextBounds };
+    }
+    emitWindowState(win);
+  } catch {
+    // Ignore display reconciliation errors
+  }
 }
 
 function createWindow() {
   const iconPath = path.join(__dirname, '..', 'build', 'icon.png');
   rendererReady = false;
   const initialState = resolveInitialWindowState();
-
-  mainWindow = new BrowserWindow({
+  currentZoomFactor = clampZoomFactor(initialState.zoomFactor);
+  lastKnownNormalBounds = {
+    x: initialState.x,
+    y: initialState.y,
     width: initialState.width,
     height: initialState.height,
-    ...(Number.isFinite(initialState.x) && Number.isFinite(initialState.y)
-      ? { x: initialState.x, y: initialState.y }
-      : {}),
-    minWidth: WINDOW_MIN_WIDTH,
-    minHeight: WINDOW_MIN_HEIGHT,
+  };
+
+  mainWindow = new BrowserWindow({
+    x: initialState.x,
+    y: initialState.y,
+    width: initialState.width,
+    height: initialState.height,
+    minWidth: initialState.minWidth,
+    minHeight: initialState.minHeight,
+    show: false,
     resizable: true,
     maximizable: true,
     minimizable: true,
@@ -492,25 +685,159 @@ function createWindow() {
     },
   });
 
-  if (initialState.isMaximized) {
-    mainWindow.maximize();
-  }
+  mainWindow.once('ready-to-show', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    applyStudioZoom(currentZoomFactor, mainWindow);
+    if (initialState.mode === 'maximized') {
+      mainWindow.maximize();
+    }
+    mainWindow.show();
+    emitWindowState(mainWindow);
+  });
+
   bindWindowStatePersistence(mainWindow);
 
   mainWindow.webContents.on('did-start-loading', () => {
     rendererReady = false;
   });
 
+  mainWindow.webContents.on('did-finish-load', () => {
+    applyStudioZoom(currentZoomFactor, mainWindow);
+  });
+
+  mainWindow.webContents.on('zoom-changed', (_event, zoomDirection) => {
+    const dir = zoomDirection === 'in' ? 1 : -1;
+    applyStudioZoom(stepZoomFactor(currentZoomFactor, dir), mainWindow);
+  });
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    rendererReady = false;
+    if (details && details.reason !== 'clean-exit') {
+      renderRecoveryPage(mainWindow, `${details.reason || 'crashed'} (${details.exitCode ?? ''})`);
+    }
+  });
+
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (isMainFrame && errorCode !== -3 && !String(validatedURL || '').startsWith('data:text/html')) {
+      renderRecoveryPage(mainWindow, `${errorCode}: ${errorDescription}`);
+    }
+  });
+
+  mainWindow.on('unresponsive', async () => {
+    if (unresponsiveDialogOpen || !mainWindow || mainWindow.isDestroyed()) return;
+    unresponsiveDialogOpen = true;
+    try {
+      const L = getMenuLabels();
+      const { response } = await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: L.unresponsiveTitle,
+        message: L.unresponsiveMessage,
+        buttons: [L.unresponsiveWait, L.unresponsiveReload],
+        defaultId: 0,
+        cancelId: 0,
+      });
+      if (response === 1 && mainWindow && !mainWindow.isDestroyed()) {
+        void loadAppEntry(mainWindow);
+      }
+    } finally {
+      unresponsiveDialogOpen = false;
+    }
+  });
+
+  mainWindow.on('responsive', () => {
+    unresponsiveDialogOpen = false;
+  });
+
   buildNativeMenu();
+  void loadAppEntry(mainWindow);
+}
 
-  const devUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5175';
-  const distIndex = path.join(__dirname, '..', 'dist', 'index.html');
-
-  if (fs.existsSync(distIndex) && !process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadFile(distIndex);
-  } else {
-    mainWindow.loadURL(devUrl);
+function sendPresenterCommand(command) {
+  if (presenterWindow && !presenterWindow.isDestroyed()) {
+    presenterWindow.webContents.send('presenter:command', command);
   }
+}
+
+function createPresenterWindow(payload = {}) {
+  const displays = screen.getAllDisplays();
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const studioDisplay =
+    mainWindow && !mainWindow.isDestroyed()
+      ? screen.getDisplayMatching(mainWindow.getBounds())
+      : primaryDisplay;
+  const targetDisplay =
+    choosePresenterDisplay({
+      displays,
+      primaryDisplay,
+      studioDisplay,
+      preferredDisplayId: payload.displayId ?? presenterDisplayId,
+    }) || primaryDisplay;
+
+  presenterDisplayId = targetDisplay.id;
+  pendingPresenterPayload = payload;
+  presenterLastSlideIndex = Number(payload.startSlideIndex) || 0;
+
+  if (presenterWindow && !presenterWindow.isDestroyed()) {
+    const wa = targetDisplay.bounds || targetDisplay.workArea;
+    presenterWindow.setBounds({
+      x: wa.x,
+      y: wa.y,
+      width: wa.width,
+      height: wa.height,
+    });
+    presenterWindow.show();
+    presenterWindow.focus();
+    presenterWindow.webContents.send('presenter:init', payload);
+    emitWindowState(mainWindow);
+    return { ok: true, displayId: presenterDisplayId, dualDisplay: displays.length > 1 };
+  }
+
+  const iconPath = path.join(__dirname, '..', 'build', 'icon.png');
+  const wa = targetDisplay.bounds || targetDisplay.workArea;
+
+  presenterWindow = new BrowserWindow({
+    x: wa.x,
+    y: wa.y,
+    width: wa.width,
+    height: wa.height,
+    show: false,
+    frame: false,
+    fullscreen: process.platform !== 'darwin',
+    fullscreenable: true,
+    backgroundColor: '#000000',
+    title: 'Motion Presentation — Presenter',
+    ...(fs.existsSync(iconPath) ? { icon: iconPath } : {}),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  presenterWindow.setMenuBarVisibility(false);
+
+  presenterWindow.once('ready-to-show', () => {
+    if (!presenterWindow || presenterWindow.isDestroyed()) return;
+    presenterWindow.show();
+    if (!presenterWindow.isFullScreen()) {
+      presenterWindow.setFullScreen(true);
+    }
+    emitWindowState(mainWindow);
+  });
+
+  presenterWindow.on('closed', () => {
+    presenterWindow = null;
+    pendingPresenterPayload = null;
+    emitWindowState(mainWindow);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('presenter:closed', {
+        slideIndex: presenterLastSlideIndex,
+      });
+    }
+  });
+
+  void loadAppEntry(presenterWindow, 'presenter=1');
+  return { ok: true, displayId: presenterDisplayId, dualDisplay: displays.length > 1 };
 }
 
 function getRecentProjectsFilePath() {
@@ -615,15 +942,133 @@ if (!gotSingleInstanceLock) {
   });
 
   ipcMain.handle('window:set-fullscreen', (_event, flag) => {
-    if (mainWindow) {
-      mainWindow.setFullScreen(Boolean(flag));
-      return mainWindow.isFullScreen();
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    const next = Boolean(flag);
+    if (next) {
+      if (!mainWindow.isFullScreen()) {
+        prePresentationMode = mainWindow.isMaximized() ? 'maximized' : 'normal';
+      }
+      isPresentingFullscreenInStudio = true;
+      mainWindow.setFullScreen(true);
+    } else {
+      isPresentingFullscreenInStudio = false;
+      mainWindow.setFullScreen(false);
+      if (prePresentationMode === 'maximized' && !mainWindow.isMaximized()) {
+        mainWindow.maximize();
+      }
+    }
+    emitWindowState(mainWindow);
+    return mainWindow.isFullScreen();
+  });
+
+  ipcMain.handle('window:is-fullscreen', () => {
+    return mainWindow && !mainWindow.isDestroyed() ? mainWindow.isFullScreen() : false;
+  });
+
+  ipcMain.handle('window:get-state', () => {
+    return getWindowStateSnapshot(mainWindow);
+  });
+
+  ipcMain.handle('window:set-zoom', (_event, factor) => {
+    return applyStudioZoom(Number(factor), mainWindow);
+  });
+
+  ipcMain.handle('window:step-zoom', (_event, direction) => {
+    const dir = Number(direction) >= 0 ? 1 : -1;
+    return applyStudioZoom(stepZoomFactor(currentZoomFactor, dir), mainWindow);
+  });
+
+  ipcMain.handle('window:reset-zoom', () => {
+    return applyStudioZoom(1.0, mainWindow);
+  });
+
+  ipcMain.handle('window:get-displays', () => {
+    const displays = screen.getAllDisplays();
+    const primary = screen.getPrimaryDisplay();
+    const studioDisplay =
+      mainWindow && !mainWindow.isDestroyed()
+        ? screen.getDisplayMatching(mainWindow.getBounds())
+        : primary;
+    return displays.map((d, idx) => ({
+      id: d.id,
+      label: d.label || `Display ${idx + 1}`,
+      bounds: d.bounds,
+      workArea: d.workArea,
+      scaleFactor: d.scaleFactor,
+      isPrimary: primary ? d.id === primary.id : false,
+      isStudioDisplay: studioDisplay ? d.id === studioDisplay.id : false,
+    }));
+  });
+
+  ipcMain.handle('window:reload-studio', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      void loadAppEntry(mainWindow);
+      return true;
     }
     return false;
   });
 
-  ipcMain.handle('window:is-fullscreen', () => {
-    return mainWindow ? mainWindow.isFullScreen() : false;
+  ipcMain.handle('presenter:open', (_event, payload) => {
+    return createPresenterWindow(payload || {});
+  });
+
+  ipcMain.handle('presenter:close', () => {
+    if (presenterWindow && !presenterWindow.isDestroyed()) {
+      presenterWindow.close();
+      return true;
+    }
+    return false;
+  });
+
+  ipcMain.handle('presenter:command', (_event, command) => {
+    if (command && typeof command === 'object') {
+      sendPresenterCommand(command);
+      return true;
+    }
+    return false;
+  });
+
+  ipcMain.on('presenter:ready', () => {
+    if (presenterWindow && !presenterWindow.isDestroyed() && pendingPresenterPayload) {
+      presenterWindow.webContents.send('presenter:init', pendingPresenterPayload);
+    }
+  });
+
+  ipcMain.on('presenter:status', (_event, status) => {
+    if (status && typeof status === 'object') {
+      if (Number.isFinite(Number(status.slideIndex))) {
+        presenterLastSlideIndex = Number(status.slideIndex);
+      }
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('presenter:status', {
+          ...status,
+          open: Boolean(presenterWindow && !presenterWindow.isDestroyed()),
+          displayId: presenterDisplayId,
+        });
+      }
+    }
+  });
+
+  ipcMain.on('presenter:request-close', (_event, lastSlideIndex) => {
+    if (Number.isFinite(Number(lastSlideIndex))) {
+      presenterLastSlideIndex = Number(lastSlideIndex);
+    }
+    if (presenterWindow && !presenterWindow.isDestroyed()) {
+      presenterWindow.close();
+    }
+  });
+
+  ipcMain.handle('presenter:set-display', (_event, displayId) => {
+    presenterDisplayId = displayId ?? null;
+    if (presenterWindow && !presenterWindow.isDestroyed() && pendingPresenterPayload) {
+      return createPresenterWindow({
+        ...pendingPresenterPayload,
+        displayId: presenterDisplayId,
+        startSlideIndex: presenterLastSlideIndex,
+      });
+    }
+    emitWindowState(mainWindow);
+    return { ok: true, displayId: presenterDisplayId };
   });
 
   ipcMain.handle('window:set-title', (_event, title) => {
@@ -1103,6 +1548,14 @@ if (!gotSingleInstanceLock) {
     protocol.handle('mpres', (request) => handleMpresRequest(request));
 
     createWindow();
+
+    screen.on('display-removed', () => {
+      ensureWindowOnValidDisplay(mainWindow);
+    });
+
+    screen.on('display-metrics-changed', () => {
+      ensureWindowOnValidDisplay(mainWindow);
+    });
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();

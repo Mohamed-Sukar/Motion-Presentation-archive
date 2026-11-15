@@ -1,10 +1,38 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
+function subscribe(channel, callback) {
+  if (typeof callback !== 'function') return () => {};
+  const listener = (_event, payload) => callback(payload);
+  ipcRenderer.on(channel, listener);
+  return () => ipcRenderer.removeListener(channel, listener);
+}
+
 contextBridge.exposeInMainWorld('desktopAPI', {
   isDesktopApp: true,
   setFullScreen: (flag) => ipcRenderer.invoke('window:set-fullscreen', flag),
   isFullScreen: () => ipcRenderer.invoke('window:is-fullscreen'),
   setWindowTitle: (title) => ipcRenderer.invoke('window:set-title', title),
+  getWindowState: () => ipcRenderer.invoke('window:get-state'),
+  onWindowState: (callback) => subscribe('window:state', callback),
+  setZoomFactor: (factor) => ipcRenderer.invoke('window:set-zoom', factor),
+  stepZoom: (direction) => ipcRenderer.invoke('window:step-zoom', direction),
+  resetZoom: () => ipcRenderer.invoke('window:reset-zoom'),
+  getDisplays: () => ipcRenderer.invoke('window:get-displays'),
+  reloadStudio: () => ipcRenderer.invoke('window:reload-studio'),
+
+  // Dedicated Presenter Window channels
+  openPresenterWindow: (payload) => ipcRenderer.invoke('presenter:open', payload),
+  closePresenterWindow: () => ipcRenderer.invoke('presenter:close'),
+  setPresenterDisplay: (displayId) => ipcRenderer.invoke('presenter:set-display', displayId),
+  sendPresenterCommand: (command) => ipcRenderer.invoke('presenter:command', command),
+  onPresenterStatus: (callback) => subscribe('presenter:status', callback),
+  onPresenterClosed: (callback) => subscribe('presenter:closed', callback),
+  signalPresenterReady: () => ipcRenderer.send('presenter:ready'),
+  onPresenterInit: (callback) => subscribe('presenter:init', callback),
+  onPresenterCommand: (callback) => subscribe('presenter:command', callback),
+  emitPresenterStatus: (status) => ipcRenderer.send('presenter:status', status),
+  requestClosePresenter: (lastSlideIndex) => ipcRenderer.send('presenter:request-close', lastSlideIndex),
+
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
   getSystemLocale: () => ipcRenderer.invoke('app:get-locale'),
   setLanguage: (lang) => ipcRenderer.invoke('app:set-language', lang),
@@ -16,11 +44,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   openDemoProject: () => ipcRenderer.invoke('project:open-demo'),
   saveProjectStreamed: (payload) => ipcRenderer.invoke('project:save-streamed', payload),
   closeProjectToken: (projectToken) => ipcRenderer.invoke('project:close-token', projectToken),
-  onSaveProgress: (callback) => {
-    const listener = (_event, progress) => callback(progress);
-    ipcRenderer.on('project:save-progress', listener);
-    return () => ipcRenderer.removeListener('project:save-progress', listener);
-  },
+  onSaveProgress: (callback) => subscribe('project:save-progress', callback),
   openMediaPathsDialog: () => ipcRenderer.invoke('media:open-dialog'),
   registerMediaPaths: (pathsList) => ipcRenderer.invoke('media:register-paths', pathsList),
 

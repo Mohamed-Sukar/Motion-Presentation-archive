@@ -20,7 +20,7 @@ export interface PresentationManifestSlideEntry {
 }
 
 export interface PresentationManifestJson {
-  skill?: 'new-motion-presentation' | 'create-new' | 'motion-reel';
+  skill?: 'new-motion-presentation' | 'animate-slides' | 'create-new' | 'motion-reel';
   title?: string;
   aspectRatio?: string;
   projectRootPath?: string;
@@ -30,7 +30,7 @@ export interface PresentationManifestJson {
 }
 
 export interface SurgicalPromptParams {
-  skillName: 'new-motion-presentation' | 'create-new';
+  skillName: 'new-motion-presentation' | 'animate-slides' | 'create-new';
   projectRootPath: string;
   outputDirPath: string;
   scope: 'slide' | 'idle-loop' | 'transition' | 'project';
@@ -491,7 +491,9 @@ export class MotionReelImporter {
     const nextIdx = idx + 1;
     const prevIdx = idx - 1;
     const skillCmd =
-      params.skillName === 'create-new' ? '/create-new' : '/new-motion-presentation';
+      params.skillName === 'animate-slides' || params.skillName === 'create-new'
+        ? '/animate-slides'
+        : '/new-motion-presentation';
     const rootPath = params.projectRootPath.trim() || '<PROJECT_ROOT_PATH>';
     const outPath = params.outputDirPath.trim() || '<PRESENTATION_OUTPUT_DIR>';
     const instruction =

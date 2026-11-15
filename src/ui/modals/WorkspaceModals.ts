@@ -140,20 +140,29 @@ export function openStageSettingsPopover(props: StageSettingsPopoverProps): void
   `;
 
   const card = host.querySelector('#stage-settings-card') as HTMLElement | null;
-  if (card && props.anchorEl && typeof window !== 'undefined') {
-    const rect = props.anchorEl.getBoundingClientRect?.();
+  if (card && typeof window !== 'undefined') {
+    const vw = window.innerWidth || 1280;
+    const vh = window.innerHeight || 720;
+    const measuredRect = card.getBoundingClientRect?.();
+    const cardHeight = Math.min(vh - 24, Math.max(260, Math.round(measuredRect?.height || 460)));
+    const cardWidth = Math.min(vw - 24, Math.max(280, Math.round(measuredRect?.width || 320)));
+    const rtl = isRtlLanguage();
+    const rect = props.anchorEl?.getBoundingClientRect?.();
+    const desiredTop = rect && rect.width > 0 ? rect.bottom + 8 : 54;
+    const top = Math.max(12, Math.min(vh - cardHeight - 12, desiredTop));
+    card.style.top = `${top}px`;
+    card.style.maxHeight = `${Math.max(220, vh - top - 12)}px`;
     if (rect && rect.width > 0) {
-      const vw = window.innerWidth || 1280;
-      const rtl = isRtlLanguage();
-      const top = Math.min((window.innerHeight || 720) - 360, rect.bottom + 8);
-      card.style.top = `${Math.max(54, top)}px`;
       if (rtl) {
-        card.style.left = `${Math.max(12, Math.min(vw - 332, rect.left))}px`;
+        card.style.left = `${Math.max(12, Math.min(vw - cardWidth - 12, rect.left))}px`;
         card.style.right = 'auto';
       } else {
-        card.style.right = `${Math.max(12, vw - rect.right)}px`;
+        card.style.right = `${Math.max(12, Math.min(vw - cardWidth - 12, vw - rect.right))}px`;
         card.style.left = 'auto';
       }
+    } else {
+      card.style.left = `${Math.max(12, Math.round((vw - cardWidth) / 2))}px`;
+      card.style.right = 'auto';
     }
   }
 

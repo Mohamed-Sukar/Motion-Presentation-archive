@@ -79,7 +79,7 @@ export interface SlideSourceMeta {
 }
 
 export interface ProjectAiSourceMeta {
-  skillName?: 'new-motion-presentation' | 'create-new' | 'motion-reel';
+  skillName?: 'new-motion-presentation' | 'animate-slides' | 'create-new' | 'motion-reel';
   projectRootPath?: string;
   outputDirPath?: string;
   creativeDirection?: string;

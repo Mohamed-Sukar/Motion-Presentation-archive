@@ -201,8 +201,11 @@ export function openAppleMenu(options: AppleMenuOpenOptions): () => void {
   });
 
   const handleDocMouseDown = (e: MouseEvent) => {
-    const target = e.target as Node | null;
-    if (target && (menuEl.contains(target) || (anchorEl && anchorEl.contains(target)))) {
+    const target = e.target;
+    if (
+      target instanceof Node &&
+      (menuEl.contains(target) || (anchorEl && anchorEl.contains(target)))
+    ) {
       return;
     }
     close();
@@ -236,8 +239,8 @@ export function openAppleMenu(options: AppleMenuOpenOptions): () => void {
   };
 
   const handleResizeOrScroll = (e: Event) => {
-    const target = e.target as Node | null;
-    if (target && menuEl.contains(target)) return;
+    const target = e.target;
+    if (target instanceof Node && menuEl.contains(target)) return;
     close();
   };
 

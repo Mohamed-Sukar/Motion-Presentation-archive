@@ -269,6 +269,10 @@ export async function runBundleCompatTests(): Promise<{ passed: number; failed: 
     v12WithAi.slides = [
       createSlideNode(makeBytesAsset('v12_img', 'image', 's1.png', new Uint8Array([1, 2])), 0),
     ];
+    v12WithAi.aiSourceMeta = { skillName: 'animate-slides' };
+    assert.equal(ProjectSerializer.buildManifestObject(v12WithAi).version, '1.2.0');
+
+    // Backward compatibility with legacy create-new
     v12WithAi.aiSourceMeta = { skillName: 'create-new' };
     assert.equal(ProjectSerializer.buildManifestObject(v12WithAi).version, '1.2.0');
 

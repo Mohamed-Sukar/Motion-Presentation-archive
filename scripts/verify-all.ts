@@ -1651,6 +1651,11 @@ console.log('\n[Test 39] Store Slices & Typed Commands Suite (Phase 4)');
 const { runStoreCommandsTests } = await import('../test/store-commands.test');
 const storeCmdRes = await runSuiteStrict('Store Slices & Typed Commands (Phase 4)', runStoreCommandsTests);
 
+// 11. Window, Responsive Layout & Presenter Isolation Suite
+console.log('\n[Test 40] Window, Layout & Presenter Isolation Suite');
+const { runWindowLayoutTests } = await import('../test/window-layout.test');
+const windowLayoutRes = await runSuiteStrict('Window, Layout & Presenter Isolation', runWindowLayoutTests);
+
 console.log('[Test 33] MotionReelImporter native /motion-reel metadata & cue mapping');
 {
   const filmJson = JSON.stringify({
@@ -1820,6 +1825,34 @@ console.log('[Test 34] Idle Loop Pairing, Presentation Manifest, Surgical AI Pro
   assert.ok(promptEn.includes('Make the headline 20% larger and boost card glow'));
   assert.ok(promptEn.includes('#2, #3'));
 
+  const promptAnimate = MotionReelImporter.buildSurgicalEditPrompt({
+    skillName: 'animate-slides',
+    projectRootPath: 'E:\\Projects\\slides-deck',
+    outputDirPath: 'E:\\Projects\\slides-deck\\out\\presentation',
+    scope: 'slide',
+    slideIndex: 1,
+    totalSlides: 2,
+    slideTitle: 'Slide 1',
+    hasIdleLoop: false,
+    userInstruction: 'Polish transition',
+    language: 'en',
+  });
+  assert.ok(promptAnimate.includes('/animate-slides'));
+
+  const promptLegacy = MotionReelImporter.buildSurgicalEditPrompt({
+    skillName: 'create-new',
+    projectRootPath: 'E:\\Projects\\legacy-deck',
+    outputDirPath: 'E:\\Projects\\legacy-deck\\out\\presentation',
+    scope: 'slide',
+    slideIndex: 1,
+    totalSlides: 2,
+    slideTitle: 'Slide 1',
+    hasIdleLoop: false,
+    userInstruction: 'Polish transition',
+    language: 'en',
+  });
+  assert.ok(promptLegacy.includes('/animate-slides'));
+
   // 4. ProjectSerializer v1.2.0 manifest roundtrip with idleLoopAsset + aiSourceMeta + sourceMeta
   const proj = createEmptyProject('AI Deck 2026');
   proj.aiSourceMeta = aiMeta;
@@ -1860,6 +1893,7 @@ console.log(`[Phase 1] Streaming ZIP & Protocol: ${streamRes.passed}/${streamRes
 console.log(`[Phase 2] Memory & Resource Budget: ${memRes.passed}/${memRes.passed + memRes.failed} Passed`);
 console.log(`[Phase 3] UI Components & Lifecycle: ${uiCompRes.passed}/${uiCompRes.passed + uiCompRes.failed} Passed`);
 console.log(`[Phase 4] Store Slices & Typed Commands: ${storeCmdRes.passed}/${storeCmdRes.passed + storeCmdRes.failed} Passed`);
+console.log(`[Window & Layout] Responsive Layout & Presenter Isolation: ${windowLayoutRes.passed}/${windowLayoutRes.passed + windowLayoutRes.failed} Passed`);
 console.log('------------------------------------------------------');
 console.log(`GRAND TOTAL: ${grandTotalPassed}/${grandTotalTests} Passed (${Math.round((grandTotalPassed / grandTotalTests) * 100)}%)`);
 console.log('======================================================\n');

@@ -67,7 +67,7 @@ export function openShortcutsHelpModalView(
           </div>
         </div>
         <div class="reel-cue-modal-footer">
-          <span class="prop-subtext">${escapeHtml(t('shortcuts.footerHint'))}</span>
+          <span class="prop-subtext">${escapeHtml(t('shortcuts.footerHint')).replace('{key}', '<kbd class="kbd-badge">Esc</kbd>')}</span>
           <button class="btn btn-prominent" id="btn-shortcuts-done" type="button">${escapeHtml(t('shortcuts.doneBtn'))}</button>
         </div>
       </div>

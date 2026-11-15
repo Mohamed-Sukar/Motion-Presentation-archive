@@ -67,7 +67,7 @@ export function renderTimelineDockView(
             ${hasLoop ? `<span class="dock-seq-loop-tag" title="Idle Loop">${Icons.replay}</span>` : ''}
           </span>
           <span class="dock-seq-meta">
-            <span class="dock-seq-label">${escapeHtml(slide.title)}</span>
+            <span class="dock-seq-label" dir="auto">${escapeHtml(slide.title)}</span>
             ${holdBadge ? `<span class="dock-seq-hold tabular-nums">${holdBadge}</span>` : ''}
           </span>
         </button>

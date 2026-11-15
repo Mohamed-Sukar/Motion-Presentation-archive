@@ -477,7 +477,7 @@ const AR_STRINGS = {
   'shortcuts.laser': 'مؤشر الليزر',
   'shortcuts.jumpNum': 'الانتقال لرقم شريحة',
   'shortcuts.exit': 'إنهاء العرض',
-  'shortcuts.footerHint': 'اضغط <kbd class="kbd-badge">Esc</kbd> أو انقر خارج النافذة للإغلاق',
+  'shortcuts.footerHint': 'اضغط {key} أو انقر خارج النافذة للإغلاق',
   'shortcuts.doneBtn': 'حسناً',
 
   // Notifications & Errors (UI + Core Services + Store)
@@ -714,6 +714,20 @@ const AR_STRINGS = {
   'about.techCredit': 'مبني باستخدام Electron و TypeScript و Vite.',
   'about.closeBtn': 'إغلاق',
   'splash.loading': 'جاري تجهيز مساحة العمل...',
+  'focus.tabStage': 'المسرح',
+  'focus.tabSlides': 'الشرائح',
+  'focus.tabInspector': 'الخصائص',
+  'zoom.chipLabel': 'واجهة {pct}% · إعادة تعيين',
+  'zoom.chipTitle': 'انقر لإعادة ضبط تكبير الواجهة إلى 100% (Ctrl+0)',
+  'zoom.inTitle': 'تكبير الواجهة (Ctrl+=)',
+  'zoom.outTitle': 'تصغير الواجهة (Ctrl+-)',
+  'zoom.resetMenu': 'حجم الواجهة الفعلي (100%)',
+  'presenter.consoleActiveTitle': 'نافذة العرض المباشر نشطة',
+  'presenter.consoleSubtitle': 'تحكم بالعرض أو ارجع إلى الاستوديو بأمان.',
+  'presenter.consoleEndBtn': 'إنهاء العرض',
+  'presenter.consoleBlackoutBtn': 'تعتيم الشاشة',
+  'presenter.displayLabel': 'شاشة العرض التقديمي',
+  'presenter.displayAuto': 'تلقائي (الشاشة الثانية أولاً)',
 } as const;
 
 export type TranslationKey = keyof typeof AR_STRINGS;
@@ -1192,7 +1206,7 @@ const EN_STRINGS: Record<TranslationKey, string> = {
   'shortcuts.laser': 'Toggle laser pointer',
   'shortcuts.jumpNum': 'Jump to slide number',
   'shortcuts.exit': 'Exit presenter',
-  'shortcuts.footerHint': 'Press <kbd class="kbd-badge">Esc</kbd> or click outside to close',
+  'shortcuts.footerHint': 'Press {key} or click outside to close',
   'shortcuts.doneBtn': 'Done',
 
   // Notifications & Errors
@@ -1429,6 +1443,20 @@ const EN_STRINGS: Record<TranslationKey, string> = {
   'about.techCredit': 'Built with Electron, TypeScript and Vite.',
   'about.closeBtn': 'Close',
   'splash.loading': 'Preparing studio workspace...',
+  'focus.tabStage': 'Stage',
+  'focus.tabSlides': 'Slides',
+  'focus.tabInspector': 'Inspector',
+  'zoom.chipLabel': 'UI {pct}% · Reset',
+  'zoom.chipTitle': 'Click to reset UI zoom to 100% (Ctrl+0)',
+  'zoom.inTitle': 'Zoom In UI (Ctrl+=)',
+  'zoom.outTitle': 'Zoom Out UI (Ctrl+-)',
+  'zoom.resetMenu': 'Reset UI Zoom (100%)',
+  'presenter.consoleActiveTitle': 'Live Presenter Window Active',
+  'presenter.consoleSubtitle': 'Control the external display or return to editing.',
+  'presenter.consoleEndBtn': 'End Presentation',
+  'presenter.consoleBlackoutBtn': 'Blackout',
+  'presenter.displayLabel': 'Presenter Display',
+  'presenter.displayAuto': 'Auto (Secondary display first)',
 };
 
 let currentLanguage: AppLanguage = 'ar';
