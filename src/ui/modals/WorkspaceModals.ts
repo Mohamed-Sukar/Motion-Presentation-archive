@@ -561,7 +561,7 @@ export function openIdleLoopModal(props: IdleLoopModalProps): void {
     <div class="modal-backdrop" id="workspace-modal-backdrop" role="dialog" aria-modal="true" aria-label="${escapeHtml(t('modal.idleLoopTitle'))}">
       <div class="modal-card apple-sheet-modal is-compact">
         <div class="modal-header">
-          <span class="modal-title">${Icons.replay} <span>${escapeHtml(t('modal.idleLoopTitle'))}</span></span>
+          <span class="modal-title">${Icons.infinityLoop} <span>${escapeHtml(t('modal.idleLoopTitle'))}</span></span>
           <button type="button" class="btn btn-icon-only" id="btn-close-workspace-modal" aria-label="${escapeHtml(t('modal.close'))}">
             ${Icons.close}
           </button>
@@ -579,7 +579,7 @@ export function openIdleLoopModal(props: IdleLoopModalProps): void {
             </div>
             <div style="display:flex;gap:8px;margin-top:8px;">
               <button type="button" class="btn btn-prominent" id="btn-modal-assign-idle" style="flex:1;">
-                ${Icons.replay}
+                ${Icons.infinityLoop}
                 <span>${escapeHtml(slide.idleLoopAsset ? t('inspector.idleLoopReplace') : t('inspector.idleLoopAssign'))}</span>
               </button>
               ${

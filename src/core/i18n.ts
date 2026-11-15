@@ -153,8 +153,8 @@ const AR_STRINGS = {
   'hud.skipLabel': 'تخطي',
   'hud.nextTitle': 'تشغيل الانتقال للشريحة التالية (Space)',
   'hud.nextAria': 'تشغيل الانتقال للشريحة التالية',
-  'hud.replayTitle': 'إعادة معاينة الانتقال الحالي',
-  'hud.replayAria': 'إعادة معاينة الانتقال الحالي',
+  'hud.replayTitle': 'إعادة العرض من البداية',
+  'hud.replayAria': 'إعادة العرض من البداية',
 
   // Inspector Tabs & Slide Section
   'inspector.tabsAria': 'أقسام الخصائص',
@@ -287,6 +287,8 @@ const AR_STRINGS = {
   'presenter.closeShortcut': 'إغلاق (S)',
   'presenter.blackoutLabel': 'إعتام الشاشة [B]',
   'presenter.whiteoutLabel': 'تبييض الشاشة [W]',
+  'presenter.laserTitle': 'مؤشر الليزر (Ctrl+L)',
+  'presenter.laserAria': 'تفعيل أو إيقاف مؤشر الليزر',
   'presenter.gridModalAria': 'متصفح الشرائح السريع',
   'presenter.gridHeading': 'الانتقال السريع إلى شريحة',
   'presenter.close': 'إغلاق',
@@ -882,8 +884,8 @@ const EN_STRINGS: Record<TranslationKey, string> = {
   'hud.skipLabel': 'Skip',
   'hud.nextTitle': 'Play transition to next slide (Space)',
   'hud.nextAria': 'Play transition to next slide',
-  'hud.replayTitle': 'Replay current transition',
-  'hud.replayAria': 'Replay current transition',
+  'hud.replayTitle': 'Restart from beginning',
+  'hud.replayAria': 'Restart from beginning',
 
   // Inspector Tabs & Slide Section
   'inspector.tabsAria': 'Inspector Sections',
@@ -1016,6 +1018,8 @@ const EN_STRINGS: Record<TranslationKey, string> = {
   'presenter.closeShortcut': 'Close (S)',
   'presenter.blackoutLabel': 'Blackout [B]',
   'presenter.whiteoutLabel': 'Whiteout [W]',
+  'presenter.laserTitle': 'Laser Pointer (Ctrl+L)',
+  'presenter.laserAria': 'Toggle laser pointer',
   'presenter.gridModalAria': 'Quick Slide Switcher',
   'presenter.gridHeading': 'Jump to Slide',
   'presenter.close': 'Close',

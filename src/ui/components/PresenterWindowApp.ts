@@ -115,8 +115,8 @@ export class PresenterWindowApp {
             ${rtl ? Icons.chevronLeft : Icons.chevronRight}
           </button>
           <div class="toolbar-divider"></div>
-          <button class="hud-transport-btn" id="fs-btn-blackout" title="${escapeHtml(t('presenter.blackoutLabel'))}" type="button">${Icons.moon}</button>
-          <button class="hud-transport-btn" id="fs-btn-laser" title="Ctrl+L" type="button">${Icons.cuePin}</button>
+          <button class="hud-transport-btn" id="fs-btn-blackout" title="${escapeHtml(t('presenter.blackoutLabel'))}" aria-label="${escapeHtml(t('presenter.blackoutLabel'))}" type="button">${Icons.monitorOff}</button>
+          <button class="hud-transport-btn" id="fs-btn-laser" title="${escapeHtml(t('presenter.laserTitle'))}" aria-label="${escapeHtml(t('presenter.laserAria'))}" type="button">${Icons.pen}</button>
           <button class="hud-transport-btn" id="fs-btn-notes" title="${escapeHtml(t('presenter.notesTitle'))}" aria-label="${escapeHtml(t('presenter.notesAria'))}" type="button">${Icons.notes}</button>
           <button class="hud-transport-btn" id="fs-btn-grid" title="${escapeHtml(t('presenter.gridTitle'))}" aria-label="${escapeHtml(t('presenter.gridAria'))}" type="button">${Icons.grid}</button>
           <button class="hud-transport-btn" id="fs-btn-exit" title="${escapeHtml(t('presenter.exitTitle'))}" aria-label="${escapeHtml(t('presenter.exitAria'))}" type="button">${Icons.close}</button>

@@ -114,7 +114,7 @@ export function renderSurgicalAiPromptMarkup(props: SurgicalAiPromptRenderProps)
       <div class="prop-row">
         <label class="prop-label" for="insp-ai-custom-input">${escapeHtml(t('inspector.aiInstructionLabel'))}</label>
         <div class="ai-chip-row">
-          <button type="button" class="btn btn-xs ai-quick-chip" data-chip-text="${escapeHtml(chipLoopVal)}">${Icons.replay}<span>${escapeHtml(t('inspector.chipLoop'))}</span></button>
+          <button type="button" class="btn btn-xs ai-quick-chip" data-chip-text="${escapeHtml(chipLoopVal)}">${Icons.infinityLoop}<span>${escapeHtml(t('inspector.chipLoop'))}</span></button>
           <button type="button" class="btn btn-xs ai-quick-chip" data-chip-text="${escapeHtml(chipFasterVal)}">${Icons.bolt}<span>${escapeHtml(t('inspector.chipFaster'))}</span></button>
           <button type="button" class="btn btn-xs ai-quick-chip" data-chip-text="${escapeHtml(chipZoomVal)}">${Icons.maximize}<span>${escapeHtml(t('inspector.chipZoom'))}</span></button>
           <button type="button" class="btn btn-xs ai-quick-chip" data-chip-text="${escapeHtml(chipColorsVal)}">${Icons.palette}<span>${escapeHtml(t('inspector.chipColors'))}</span></button>

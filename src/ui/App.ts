@@ -3251,7 +3251,7 @@ export class MotionPresentationApp {
       {
         onPrev: () => this.previewEngine.previous(),
         onNext: () => this.previewEngine.next(),
-        onReplay: () => this.previewEngine.previewCurrentTransition(),
+        onReplay: () => this.previewEngine.jumpToSlide(0, true),
       }
     );
 
@@ -3401,7 +3401,7 @@ export class MotionPresentationApp {
           </div>
           <div class="inspector-tools-stack">
             <button type="button" class="btn inspector-tool-btn" id="btn-open-idle-loop-modal">
-              ${Icons.replay}
+              ${Icons.infinityLoop}
               <span>${t('inspector.idleLoopBtn')}</span>
               <span class="inspector-tool-badge ${hasLoop ? 'is-active' : ''}">${hasLoop ? t('inspector.idleLoopActive') : t('inspector.idleLoopOff')}</span>
             </button>
