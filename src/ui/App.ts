@@ -245,6 +245,7 @@ export class MotionPresentationApp {
   private sequenceLayoutPref: SequenceLayoutPreference = 'auto';
   private isStageOverviewOpen = false;
   private isSkinPopoverOpen = false;
+  private skinPopoverFromRail = false;
   private isStageSettingsOpen = false;
   private navigatorWidth = 264;
   private inspectorWidth = 280;
@@ -708,7 +709,6 @@ export class MotionPresentationApp {
 
     const splitWidth = splitView?.getBoundingClientRect?.().width || 0;
     const vw = window?.innerWidth || splitWidth || 1280;
-    const vh = window?.innerHeight || 720;
     const focusMode = Boolean(this.lastLayoutPlan?.focusMode);
 
     if (focusMode) {
@@ -734,8 +734,8 @@ export class MotionPresentationApp {
       if (activeNav + activeInsp > budget) {
         if (this.isInspectorVisible && activeNav + this.minInspectorWidth > budget) {
           overlayInspector = true;
-          sheetInspector = vh <= 600;
-          inspW = Math.min(inspW, Math.max(240, splitWidth - 48));
+          sheetInspector = false;
+          inspW = Math.min(inspW, Math.max(260, Math.min(320, splitWidth - 28)));
         }
 
         const remainingActiveNav = this.isNavigatorVisible ? navW : 0;
@@ -1992,35 +1992,39 @@ export class MotionPresentationApp {
     }
   }
 
-  private toggleSkinPopover(): void {
+  private toggleSkinPopover(fromRail = false): void {
     if (this.isSkinPopoverOpen) {
       this.closeSkinPopover();
       return;
     }
     this.isSkinPopoverOpen = true;
-    this.renderSkinPopover();
+    this.skinPopoverFromRail = fromRail;
+    this.renderSkinPopover(fromRail);
   }
 
   private closeSkinPopover(): void {
     this.isSkinPopoverOpen = false;
+    this.skinPopoverFromRail = false;
     this.skinPopoverScope.clear();
     const host = this.root.querySelector('#skin-popover-host') as HTMLElement | null;
     if (host) host.innerHTML = '';
   }
 
-  private renderSkinPopover(): void {
+  private renderSkinPopover(fromRail = this.skinPopoverFromRail): void {
     const host = this.root.querySelector('#skin-popover-host') as HTMLElement | null;
     if (!host) return;
     this.skinPopoverScope.clear();
     const activeSkin = getStudioSkin();
     const themePref = getThemePreference();
+    const railBtnRect = (this.root.querySelector('#rail-btn-skins') as HTMLElement | null)?.getBoundingClientRect?.();
+    const anchorToRail = Boolean(fromRail && railBtnRect && railBtnRect.width > 0);
 
     host.innerHTML = `
-      <div class="skin-popover-backdrop apple-popover-backdrop" id="skin-popover-backdrop">
+      <div class="skin-popover-backdrop apple-popover-backdrop ${anchorToRail ? '' : 'is-centered'}" id="skin-popover-backdrop">
         <div class="skin-popover-card apple-skin-popover" id="skin-popover-card" role="dialog" aria-label="${this.escapeHtml(t('skin.popoverTitle'))}">
           <div class="skin-popover-head">
             <span>${Icons.palette} <span>${this.escapeHtml(t('skin.popoverTitle'))}</span></span>
-            <button type="button" class="btn btn-icon-only btn-xs" id="btn-close-skin-popover" aria-label="Close">
+            <button type="button" class="btn btn-icon-only btn-xs" id="btn-close-skin-popover" aria-label="${this.escapeHtml(t('modal.close'))}">
               ${Icons.close}
             </button>
           </div>
@@ -2196,7 +2200,7 @@ export class MotionPresentationApp {
       void this.handleOpenReelWorkflow();
     });
     this.activityRailScope.listen(rail.querySelector('#rail-btn-skins'), 'click', () => {
-      this.toggleSkinPopover();
+      this.toggleSkinPopover(true);
     });
     this.activityRailScope.listen(rail.querySelector('#rail-btn-shortcuts'), 'click', () => {
       this.openShortcutsHelpModal();

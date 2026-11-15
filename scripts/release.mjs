@@ -94,6 +94,13 @@ function main() {
         const lockRel = path.relative(gitCwd, lockPath);
         execSync(`git add "${lockRel}"`, { cwd: gitCwd, stdio: 'inherit' });
       }
+      for (const buildAsset of ['build/installerSidebar.bmp', 'build/icon.png', 'build/icon.ico']) {
+        const assetAbs = path.join(appDir, buildAsset);
+        if (fs.existsSync(assetAbs)) {
+          const assetRel = path.relative(gitCwd, assetAbs);
+          execSync(`git add "${assetRel}"`, { cwd: gitCwd, stdio: 'inherit' });
+        }
+      }
       execSync(`git commit -m "chore: release v${nextVersion}"`, { cwd: gitCwd, stdio: 'inherit' });
       execSync(`git tag -a "v${nextVersion}" -m "Release v${nextVersion}"`, { cwd: gitCwd, stdio: 'inherit' });
       console.log(`🏷️  Created git commit & tag: v${nextVersion}`);

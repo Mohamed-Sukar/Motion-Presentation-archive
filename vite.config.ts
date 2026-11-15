@@ -16,5 +16,23 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
     target: 'esnext',
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          const normalized = id.replace(/\\/g, '/');
+          if (
+            normalized.includes('/src/ui/modals/') ||
+            normalized.includes('/src/ui/components/SurgicalAiPromptView') ||
+            normalized.includes('/src/ui/components/PresenterWindowApp')
+          ) {
+            return 'studio-modals';
+          }
+          if (normalized.includes('/src/core/')) {
+            return 'studio-core';
+          }
+          return undefined;
+        },
+      },
+    },
   },
 });

@@ -17,10 +17,6 @@ function lerp(a, b, t) {
   return a + (b - a) * t;
 }
 
-function mixRgb(c1, c2, t) {
-  return [lerp(c1[0], c2[0], t), lerp(c1[1], c2[1], t), lerp(c1[2], c2[2], t)];
-}
-
 function smoothstep(edge0, edge1, x) {
   const t = clamp((x - edge0) / (edge1 - edge0 || 1e-6));
   return t * t * (3 - 2 * t);

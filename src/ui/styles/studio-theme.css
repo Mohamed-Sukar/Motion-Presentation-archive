@@ -884,6 +884,12 @@
   padding: min(58px, 4vh) min(58px, 4vw);
 }
 
+.skin-popover-backdrop.is-centered {
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
 .skin-popover-card {
   width: min(300px, calc(100vw - 24px));
   max-height: calc(100dvh - 32px);
@@ -1801,9 +1807,30 @@
   gap: 5px;
 }
 
-.studio-timeline-dock .dock-seq-thumb {
+.split-view.is-compact-height .studio-timeline-dock .dock-seq-thumb {
   width: 30px;
   height: 18px;
+}
+
+.split-view.is-compact-height .studio-timeline-dock .dock-seq-node.dock-ribbon-card {
+  width: 114px;
+  padding: 0;
+  gap: 0;
+}
+
+.split-view.is-compact-height .studio-timeline-dock .dock-seq-node.dock-ribbon-card .dock-seq-thumb {
+  width: 100%;
+  height: 46px;
+}
+
+.split-view.is-compact-height .studio-timeline-dock .dock-seq-meta {
+  padding: 4px 6px;
+}
+
+@media (max-width: 820px) {
+  .studio-timeline-dock .dock-header-lead .dock-stat-pill + .dock-stat-pill {
+    display: none;
+  }
 }
 
 .stage-pane.is-compact-height .stage-canvas-area {
@@ -2038,7 +2065,7 @@
 /* Apple Sheet Modals (Engine Prefs, Deck Diagnostics, Trim/Split, Idle Loop, Surgical AI) */
 .apple-sheet-modal {
   width: min(640px, calc(100vw - 32px));
-  max-height: min(84vh, 720px);
+  max-height: min(calc(100dvh - 24px), 720px);
   display: flex;
   flex-direction: column;
 }
@@ -2049,7 +2076,9 @@
 
 .apple-sheet-modal .modal-body {
   overflow-y: auto;
-  max-height: calc(84vh - 116px);
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
 }
 
 .apple-sheet-grid {
@@ -2323,19 +2352,31 @@
 
 .split-view.is-inspector-sheet .inspector-pane.is-sheet-drawer:not(.collapsed) {
   position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: 10px;
-  top: auto;
+  inset: 40px 8px 8px 8px;
   width: auto !important;
   max-width: none !important;
-  height: min(62vh, 380px);
+  height: auto;
   z-index: 68;
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-lg);
   border: 1px solid var(--glass-border);
   background: var(--glass-bg-elevated);
   backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: var(--shadow-lg);
+}
+
+.split-view.is-inspector-sheet .inspector-pane.is-sheet-drawer .inspector-scroll > * {
+  max-width: 540px;
+  margin-inline: auto;
+  width: 100%;
+}
+
+.split-view.is-focus-mode[data-focus-tab='slides'] .stage-canvas-area,
+.split-view.is-focus-mode[data-focus-tab='slides'] .floating-stage-hud,
+.split-view.is-focus-mode[data-focus-tab='inspector'] .stage-canvas-area,
+.split-view.is-focus-mode[data-focus-tab='inspector'] .floating-stage-hud {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .zoom-reset-chip {
