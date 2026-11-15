@@ -7,6 +7,7 @@ import {
   HudVisibility,
   InterruptBehavior,
   MediaAsset,
+  MediaKind,
   PresentationSettings,
   SegmentEasing,
   SlideNode,
@@ -25,6 +26,13 @@ import {
   VIDEO_ACCEPT_STRING,
 } from '../core/services/MediaValidator';
 import { ProjectSerializer } from '../core/services/ProjectSerializer';
+import {
+  OpenedProjectDescriptor,
+  RegisteredMediaDescriptor,
+  StreamingSavePayload,
+  StreamingSaveResult,
+  projectFiles,
+} from '../core/services/ProjectFileService';
 import { CueDetectionResult, CueDetectionSensitivity, SmartPairer } from '../core/services/SmartPairer';
 import { MotionReelImporter, MotionReelMetadata } from '../core/services/MotionReelImporter';
 import {
@@ -63,6 +71,20 @@ declare global {
       getSystemLocale?: () => Promise<'ar' | 'en'>;
       setLanguage?: (lang: 'ar' | 'en') => Promise<'ar' | 'en'>;
       setTheme?: (theme: 'system' | 'dark' | 'light') => Promise<'dark' | 'light'>;
+      openProjectStreamedDialog?: () => Promise<OpenedProjectDescriptor | null>;
+      openProjectByPath?: (filePath: string) => Promise<OpenedProjectDescriptor>;
+      saveProjectStreamed?: (payload: StreamingSavePayload) => Promise<StreamingSaveResult | null>;
+      closeProjectToken?: (projectToken: string) => Promise<void>;
+      onSaveProgress?: (
+        callback: (progress: {
+          bytesWritten: number;
+          totalBytes: number;
+          percent: number;
+          currentFile: string;
+        }) => void
+      ) => () => void;
+      openMediaPathsDialog?: () => Promise<RegisteredMediaDescriptor[] | null>;
+      registerMediaPaths?: (pathsList: string[]) => Promise<RegisteredMediaDescriptor[]>;
       openProjectDialog?: () => Promise<{
         filePath: string;
         fileName: string;
@@ -79,17 +101,11 @@ declare global {
         bundleBytes: Uint8Array;
         manifestJson: string;
       }) => Promise<{ filePath: string; fileName: string }>;
-      consumePendingProjectFile?: () => Promise<{
-        filePath: string;
-        fileName: string;
-        buffer: ArrayBuffer;
-      } | null>;
+      consumePendingProjectFile?: () => Promise<
+        (OpenedProjectDescriptor & { buffer?: ArrayBuffer }) | null
+      >;
       onOpenProjectFile?: (
-        callback: (payload: {
-          filePath: string;
-          fileName: string;
-          buffer: ArrayBuffer;
-        }) => void
+        callback: (payload: OpenedProjectDescriptor & { buffer?: ArrayBuffer }) => void
       ) => void;
       openMediaDialog?: () => Promise<Array<{ fileName: string; mimeType: string; buffer: ArrayBuffer }> | null>;
       onMenuCommand?: (callback: (command: string) => void) => void;
@@ -1027,19 +1043,28 @@ export class MotionPresentationApp {
 
   private bindDesktopProjectOpenEvents(): void {
     window.desktopAPI?.onOpenProjectFile?.((payload) => {
-      if (!payload?.buffer) return;
-      void this.openProjectFromBytes(
-        new Uint8Array(payload.buffer),
-        payload.fileName,
-        payload.filePath
-      );
+      if (!payload) return;
+      if (payload.projectToken && typeof payload.manifestJson === 'string') {
+        void this.openDesktopStreamedProject(payload);
+        return;
+      }
+      if (payload.buffer) {
+        void this.openProjectFromBytes(
+          new Uint8Array(payload.buffer),
+          payload.fileName,
+          payload.filePath
+        );
+      }
     });
   }
 
   private async consumeInitialProjectFile(): Promise<void> {
     try {
       const pending = await window.desktopAPI?.consumePendingProjectFile?.();
-      if (pending?.buffer) {
+      if (!pending) return;
+      if (pending.projectToken && typeof pending.manifestJson === 'string') {
+        await this.openDesktopStreamedProject(pending);
+      } else if (pending.buffer) {
         await this.openProjectFromBytes(
           new Uint8Array(pending.buffer),
           pending.fileName,
@@ -1049,6 +1074,31 @@ export class MotionPresentationApp {
     } catch (err) {
       this.store.notify(
         err instanceof Error ? err.message : t('notify.openSelectedProjectError'),
+        'error'
+      );
+    }
+  }
+
+  private async openDesktopStreamedProject(opened: OpenedProjectDescriptor): Promise<void> {
+    try {
+      if (this.isPresentingFullscreen) {
+        await this.exitFullscreenPresentation();
+      }
+      if (this.isModalOpen && this.activeModalClose) {
+        this.activeModalClose();
+      }
+      this.store.notify(t('notify.openProjectProgress', { name: opened.fileName }), 'info', 2500);
+      const data = await this.store.loadOpenedDesktopProject(opened);
+      this.currentProjectFilePath = opened.filePath || null;
+      this.syncWindowTitle();
+      if (opened.recoveredFromBackup) {
+        this.store.notify(t('notify.projectRestoredFromBackup'), 'warning', 7000);
+      } else {
+        this.store.notify(t('notify.openProjectSuccess', { title: data.title }), 'success');
+      }
+    } catch (err) {
+      this.store.notify(
+        err instanceof Error ? err.message : t('notify.openProjectError'),
         'error'
       );
     }
@@ -1089,8 +1139,47 @@ export class MotionPresentationApp {
     if (project.slides.length === 0) return;
 
     this.isSavingProject = true;
+    let unsubscribeProgress: (() => void) | null = null;
     try {
-      this.store.notify(t('notify.saveProjectProgress'), 'info', 3000);
+      this.store.notify(t('notify.saveProjectProgress'), 'info', 4000);
+
+      if (projectFiles.isDesktop()) {
+        let lastToastAt = 0;
+        unsubscribeProgress =
+          window.desktopAPI?.onSaveProgress?.((progress) => {
+            const now = Date.now();
+            if (progress.percent < 100 && now - lastToastAt < 90) return;
+            lastToastAt = now;
+            this.store.notify(
+              t('notify.saveProjectProgressPercent', {
+                percent: progress.percent,
+                file: progress.currentFile || 'manifest.json',
+              }),
+              'info',
+              4000
+            );
+          }) || null;
+
+        const result = await projectFiles.saveProject(project, {
+          forceSaveAs: saveAs,
+          currentFilePath: this.currentProjectFilePath,
+          activeProjectToken: this.store.getProjectToken(),
+        });
+
+        if (!result) return;
+        if (!result.ok) {
+          const names = result.missingFiles.map((m) => m.fileName || m.path).join(', ');
+          this.store.notify(t('notify.saveMissingSources', { files: names }), 'error', 8000);
+          return;
+        }
+
+        this.currentProjectFilePath = result.filePath;
+        this.store.setProjectToken(result.projectToken);
+        this.syncWindowTitle();
+        this.store.notify(t('notify.saveProjectSuccess', { name: result.fileName }), 'success');
+        return;
+      }
+
       void ProjectSerializer.cacheProjectAssetsToLocalDb(project);
 
       const bundleBytes = await ProjectSerializer.buildBundleBytes(project);
@@ -1134,13 +1223,18 @@ export class MotionPresentationApp {
         'error'
       );
     } finally {
+      unsubscribeProgress?.();
       this.isSavingProject = false;
     }
   }
 
   private async handleOpenProject(): Promise<void> {
     try {
-      if (window.desktopAPI?.openProjectDialog) {
+      if (window.desktopAPI?.openProjectStreamedDialog) {
+        const res = await window.desktopAPI.openProjectStreamedDialog();
+        if (!res) return;
+        await this.openDesktopStreamedProject(res);
+      } else if (window.desktopAPI?.openProjectDialog) {
         const res = await window.desktopAPI.openProjectDialog();
         if (!res) return;
         await this.openProjectFromBytes(new Uint8Array(res.buffer), res.fileName, res.filePath);
@@ -1157,7 +1251,19 @@ export class MotionPresentationApp {
   }
 
   private async handleImportMedia(): Promise<void> {
-    if (window.desktopAPI?.openMediaDialog) {
+    if (window.desktopAPI?.openMediaPathsDialog) {
+      try {
+        const selected = await window.desktopAPI.openMediaPathsDialog();
+        if (selected && selected.length > 0) {
+          await this.handleBatchDesktopDescriptors(selected);
+        }
+      } catch (err) {
+        this.store.notify(
+          err instanceof Error ? err.message : t('notify.importMediaError'),
+          'error'
+        );
+      }
+    } else if (window.desktopAPI?.openMediaDialog) {
       try {
         const selected = await window.desktopAPI.openMediaDialog();
         if (selected && selected.length > 0) {
@@ -3345,8 +3451,17 @@ export class MotionPresentationApp {
       if (!projectInput.files?.length) return;
       const file = projectInput.files[0];
       projectInput.value = '';
-      const bytes = new Uint8Array(await file.arrayBuffer());
       const filePath = window.desktopAPI?.getPathForFile?.(file) || null;
+      if (filePath && window.desktopAPI?.openProjectByPath) {
+        try {
+          const opened = await window.desktopAPI.openProjectByPath(filePath);
+          await this.openDesktopStreamedProject(opened);
+          return;
+        } catch {
+          // Fall back to byte parsing if path open fails
+        }
+      }
+      const bytes = new Uint8Array(await file.arrayBuffer());
       await this.openProjectFromBytes(bytes, file.name, filePath);
     });
 
@@ -3358,7 +3473,7 @@ export class MotionPresentationApp {
       singleImgInput.value = '';
 
       try {
-        const asset = await MediaValidator.ingestFile(file, 'image');
+        const asset = await this.ingestMediaFilePreferDesktop(file, 'image');
         if (replaceId) {
           this.store.replaceSlideImage(replaceId, asset);
           this.store.notify(t('notify.slideImageUpdated', { name: asset.name }), 'success');
@@ -3411,10 +3526,36 @@ export class MotionPresentationApp {
     });
   }
 
+  private async ingestMediaFilePreferDesktop(
+    file: File,
+    expectedKind?: MediaKind
+  ): Promise<MediaAsset> {
+    const check = MediaValidator.validateFile(file, expectedKind);
+    if (!check.valid || !check.kind) {
+      throw new Error(check.errorReason || t('core.invalidFile'));
+    }
+
+    const filePath = window.desktopAPI?.getPathForFile?.(file) || null;
+    if (filePath && window.desktopAPI?.registerMediaPaths) {
+      const registered = await window.desktopAPI.registerMediaPaths([filePath]);
+      if (registered.length > 0) {
+        const reg = registered[0];
+        return await MediaValidator.ingestFromUrl(reg.url, expectedKind || check.kind, {
+          fileName: reg.fileName || file.name,
+          mimeType: reg.mimeType || file.type || '',
+          size: reg.size || file.size,
+          source: { kind: 'file', path: reg.path },
+        });
+      }
+    }
+
+    return await MediaValidator.ingestFile(file, expectedKind);
+  }
+
   private async attachIdleLoopVideoToSlide(slideId: string, file: File): Promise<void> {
     try {
       this.store.notify(t('notify.analyzingVideo', { name: file.name }), 'info', 2000);
-      const videoAsset = await MediaValidator.ingestFile(file, 'video');
+      const videoAsset = await this.ingestMediaFilePreferDesktop(file, 'video');
       this.store.setSlideIdleLoopVideo(slideId, videoAsset);
       this.store.notify(
         t('notify.idleLoopAssigned', { name: videoAsset.name }),
@@ -3431,7 +3572,7 @@ export class MotionPresentationApp {
   private async attachVideoFileToSlide(slideId: string, file: File): Promise<void> {
     try {
       this.store.notify(t('notify.analyzingVideo', { name: file.name }), 'info', 2000);
-      const videoAsset = await MediaValidator.ingestFile(file, 'video');
+      const videoAsset = await this.ingestMediaFilePreferDesktop(file, 'video');
       this.store.setSlideTransitionVideo(slideId, videoAsset);
       this.store.notify(
         t('notify.transVideoLinked', {
@@ -3488,12 +3629,58 @@ export class MotionPresentationApp {
     });
   }
 
+  private async handleBatchDesktopDescriptors(
+    descriptors: RegisteredMediaDescriptor[]
+  ): Promise<void> {
+    if (!descriptors.length) return;
+    this.store.notify(t('notify.batchScanning', { count: descriptors.length }), 'info', 3000);
+    try {
+      const { newSlides, unpairedVideos, report } = await SmartPairer.processBatchMediaDescriptors(
+        descriptors,
+        this.store.getSlides().length,
+        this.store.getSettings().defaultFallbackStyle,
+        {
+          onProgress: (done, total, fileName) => {
+            this.store.notify(
+              t('notify.batchProgress', { done, total, name: fileName }),
+              'info',
+              2500
+            );
+          },
+        }
+      );
+
+      let inferredDir: string | undefined;
+      const firstPath = descriptors[0]?.path;
+      if (firstPath) {
+        const sepIdx = Math.max(firstPath.lastIndexOf('\\'), firstPath.lastIndexOf('/'));
+        if (sepIdx > 0) inferredDir = firstPath.slice(0, sepIdx);
+      }
+
+      this.applyBatchImportResult(newSlides, unpairedVideos, report, null, inferredDir);
+    } catch (err) {
+      this.store.notify(
+        err instanceof Error ? err.message : t('notify.importFilesError'),
+        'error'
+      );
+    }
+  }
+
   private async handleBatchFiles(files: File[]): Promise<void> {
     if (files.length === 1) {
       const file = files[0];
       if (/\.(mpres|mpres\.json)$/i.test(file.name)) {
-        const bytes = new Uint8Array(await file.arrayBuffer());
         const filePath = window.desktopAPI?.getPathForFile?.(file) || null;
+        if (filePath && window.desktopAPI?.openProjectByPath) {
+          try {
+            const opened = await window.desktopAPI.openProjectByPath(filePath);
+            await this.openDesktopStreamedProject(opened);
+            return;
+          } catch {
+            // Fall back to byte parsing if direct path streaming fails
+          }
+        }
+        const bytes = new Uint8Array(await file.arrayBuffer());
         await this.openProjectFromBytes(bytes, file.name, filePath);
         return;
       }
@@ -3508,7 +3695,10 @@ export class MotionPresentationApp {
       const reelBundle = await MotionReelImporter.parseBundle(files);
       if (reelBundle.isMotionReel && reelBundle.primaryVideoFile) {
         try {
-          const videoAsset = await MediaValidator.ingestFile(reelBundle.primaryVideoFile, 'video');
+          const videoAsset = await this.ingestMediaFilePreferDesktop(
+            reelBundle.primaryVideoFile,
+            'video'
+          );
           const existingSlides = this.store.getSlides();
           if (reelBundle.title && existingSlides.length === 0) {
             this.store.setProjectTitle(reelBundle.title);
@@ -3558,6 +3748,22 @@ export class MotionPresentationApp {
     const mediaFiles = files.filter((f) => !/\.json$/i.test(f.name));
     if (!mediaFiles.length) return;
 
+    const regByNormPath = new Map<string, RegisteredMediaDescriptor>();
+    const normalizePathKey = (p: string) => p.replace(/\\/g, '/').toLowerCase();
+    if (window.desktopAPI?.getPathForFile && window.desktopAPI?.registerMediaPaths) {
+      const candidatePaths: string[] = [];
+      for (const f of mediaFiles) {
+        const p = window.desktopAPI.getPathForFile(f);
+        if (p) candidatePaths.push(p);
+      }
+      if (candidatePaths.length > 0) {
+        const registered = await window.desktopAPI.registerMediaPaths(candidatePaths).catch(() => []);
+        for (const reg of registered) {
+          regByNormPath.set(normalizePathKey(reg.path), reg);
+        }
+      }
+    }
+
     this.store.notify(t('notify.batchScanning', { count: mediaFiles.length }), 'info', 3000);
     try {
       const { newSlides, unpairedVideos, report } = await SmartPairer.processBatchFiles(
@@ -3572,6 +3778,15 @@ export class MotionPresentationApp {
               2500
             );
           },
+          resolveMediaSource:
+            regByNormPath.size > 0
+              ? (file) => {
+                  const p = window.desktopAPI?.getPathForFile?.(file);
+                  if (!p) return null;
+                  const reg = regByNormPath.get(normalizePathKey(p));
+                  return reg ? { path: reg.path, url: reg.url, size: reg.size } : null;
+                }
+              : undefined,
         }
       );
 
@@ -3582,64 +3797,78 @@ export class MotionPresentationApp {
         if (sepIdx > 0) inferredDir = firstPath.slice(0, sepIdx);
       }
 
-      if (parsedManifest) {
-        const aiMeta = MotionReelImporter.applyPresentationManifestToSlides(
-          newSlides,
-          parsedManifest
-        );
-        if (!aiMeta.outputDirPath && inferredDir) {
-          aiMeta.outputDirPath = inferredDir;
-        }
-        if (parsedManifest.title && this.store.getSlides().length === 0) {
-          this.store.setProjectTitle(parsedManifest.title);
-        }
-        const ratio = MotionReelImporter.formatToAspectRatio(parsedManifest.aspectRatio);
-        if (ratio && this.store.getSlides().length === 0) {
-          this.store.updateSettings({ aspectRatio: ratio });
-        }
-        this.store.setProjectAiSourceMeta(aiMeta);
-      } else if (inferredDir && !this.store.getProjectAiSourceMeta()?.outputDirPath) {
-        this.store.setProjectAiSourceMeta({
-          ...(this.store.getProjectAiSourceMeta() || {}),
-          outputDirPath: inferredDir,
-        });
-      }
-
-      if (newSlides.length > 0 || unpairedVideos.length > 0) {
-        this.store.appendBatchSlides(newSlides, unpairedVideos);
-      }
-
-      if (report.rejectedFiles.length > 0) {
-        const firstErr = report.rejectedFiles[0];
-        this.store.notify(
-          `${t('notify.batchImportedPartial', {
-            slides: this.formatArabicSlideCount(report.slidesAdded),
-            rejected: report.rejectedFiles.length,
-          })} (${firstErr.name}: ${firstErr.reason})`,
-          'warning',
-          5500
-        );
-      } else if (report.slidesAdded === 0 && report.transitionsMatched === 0) {
-        this.store.notify(t('notify.batchNothingValid'), 'warning');
-      } else if (parsedManifest) {
-        this.store.notify(
-          t('notify.manifestApplied', { count: newSlides.length }),
-          'success',
-          4000
-        );
-      } else {
-        this.store.notify(
-          t('notify.batchImportedSuccess', {
-            slides: this.formatArabicSlideCount(report.slidesAdded),
-            matched: report.transitionsMatched,
-          }),
-          'success'
-        );
-      }
+      this.applyBatchImportResult(newSlides, unpairedVideos, report, parsedManifest, inferredDir);
     } catch (err) {
       this.store.notify(
         err instanceof Error ? err.message : t('notify.importFilesError'),
         'error'
+      );
+    }
+  }
+
+  private applyBatchImportResult(
+    newSlides: SlideNode[],
+    unpairedVideos: MediaAsset[],
+    report: {
+      slidesAdded: number;
+      transitionsMatched: number;
+      rejectedFiles: Array<{ name: string; reason: string }>;
+    },
+    parsedManifest: ReturnType<typeof MotionReelImporter.parsePresentationManifest>,
+    inferredDir?: string
+  ): void {
+    if (parsedManifest) {
+      const aiMeta = MotionReelImporter.applyPresentationManifestToSlides(
+        newSlides,
+        parsedManifest
+      );
+      if (!aiMeta.outputDirPath && inferredDir) {
+        aiMeta.outputDirPath = inferredDir;
+      }
+      if (parsedManifest.title && this.store.getSlides().length === 0) {
+        this.store.setProjectTitle(parsedManifest.title);
+      }
+      const ratio = MotionReelImporter.formatToAspectRatio(parsedManifest.aspectRatio);
+      if (ratio && this.store.getSlides().length === 0) {
+        this.store.updateSettings({ aspectRatio: ratio });
+      }
+      this.store.setProjectAiSourceMeta(aiMeta);
+    } else if (inferredDir && !this.store.getProjectAiSourceMeta()?.outputDirPath) {
+      this.store.setProjectAiSourceMeta({
+        ...(this.store.getProjectAiSourceMeta() || {}),
+        outputDirPath: inferredDir,
+      });
+    }
+
+    if (newSlides.length > 0 || unpairedVideos.length > 0) {
+      this.store.appendBatchSlides(newSlides, unpairedVideos);
+    }
+
+    if (report.rejectedFiles.length > 0) {
+      const firstErr = report.rejectedFiles[0];
+      this.store.notify(
+        `${t('notify.batchImportedPartial', {
+          slides: this.formatArabicSlideCount(report.slidesAdded),
+          rejected: report.rejectedFiles.length,
+        })} (${firstErr.name}: ${firstErr.reason})`,
+        'warning',
+        5500
+      );
+    } else if (report.slidesAdded === 0 && report.transitionsMatched === 0) {
+      this.store.notify(t('notify.batchNothingValid'), 'warning');
+    } else if (parsedManifest) {
+      this.store.notify(
+        t('notify.manifestApplied', { count: newSlides.length }),
+        'success',
+        4000
+      );
+    } else {
+      this.store.notify(
+        t('notify.batchImportedSuccess', {
+          slides: this.formatArabicSlideCount(report.slidesAdded),
+          matched: report.transitionsMatched,
+        }),
+        'success'
       );
     }
   }
@@ -4673,7 +4902,26 @@ export class MotionPresentationApp {
     return `${String(mins).padStart(2, '0')}:${String(whole).padStart(2, '0')}.${String(centis).padStart(2, '0')}`;
   }
 
-  private async pickVideoViaDesktop(): Promise<File | null> {
+  private async pickVideoAssetViaDesktop(): Promise<MediaAsset | null> {
+    if (window.desktopAPI?.openMediaPathsDialog) {
+      const selected = await window.desktopAPI.openMediaPathsDialog();
+      if (!selected || selected.length === 0) return null;
+
+      for (const item of selected) {
+        if (MediaValidator.validateDescriptor(item.fileName, item.mimeType, item.size, 'video').valid) {
+          this.store.notify(t('notify.analyzingVideo', { name: item.fileName }), 'info', 2500);
+          return await MediaValidator.ingestFromUrl(item.url, 'video', {
+            fileName: item.fileName,
+            mimeType: item.mimeType,
+            size: item.size,
+            source: { kind: 'file', path: item.path },
+          });
+        }
+      }
+      this.store.notify(t('notify.pickValidVideo'), 'warning');
+      return null;
+    }
+
     if (!window.desktopAPI?.openMediaDialog) return null;
     const selected = await window.desktopAPI.openMediaDialog();
     if (!selected || selected.length === 0) return null;
@@ -4681,7 +4929,8 @@ export class MotionPresentationApp {
     for (const item of selected) {
       const file = new File([item.buffer], item.fileName, { type: item.mimeType });
       if (MediaValidator.validateFile(file, 'video').valid) {
-        return file;
+        this.store.notify(t('notify.analyzingVideo', { name: file.name }), 'info', 2500);
+        return await MediaValidator.ingestFile(file, 'video');
       }
     }
     this.store.notify(t('notify.pickValidVideo'), 'warning');
@@ -4689,11 +4938,11 @@ export class MotionPresentationApp {
   }
 
   private async handleOpenReelWorkflow(): Promise<void> {
-    if (window.desktopAPI?.openMediaDialog) {
+    if (window.desktopAPI?.openMediaPathsDialog || window.desktopAPI?.openMediaDialog) {
       try {
-        const file = await this.pickVideoViaDesktop();
-        if (file) {
-          await this.ingestAndRouteReelVideo(file, true);
+        const videoAsset = await this.pickVideoAssetViaDesktop();
+        if (videoAsset) {
+          this.routeIngestedReelVideoAsset(videoAsset, true);
         }
       } catch (err) {
         this.store.notify(
@@ -4707,23 +4956,27 @@ export class MotionPresentationApp {
     }
   }
 
+  private routeIngestedReelVideoAsset(videoAsset: MediaAsset, forceReelModal = false): void {
+    const slides = this.store.getSlides();
+
+    if (slides.length === 0) {
+      this.openReelCueModal(videoAsset, { mode: 'replace-all' });
+      return;
+    }
+
+    if (forceReelModal) {
+      this.openReelCueModal(videoAsset, { mode: 'append' });
+      return;
+    }
+
+    this.openSingleVideoActionModal(videoAsset);
+  }
+
   private async ingestAndRouteReelVideo(file: File, forceReelModal = false): Promise<void> {
     try {
       this.store.notify(t('notify.analyzingVideo', { name: file.name }), 'info', 2500);
-      const videoAsset = await MediaValidator.ingestFile(file, 'video');
-      const slides = this.store.getSlides();
-
-      if (slides.length === 0) {
-        this.openReelCueModal(videoAsset, { mode: 'replace-all' });
-        return;
-      }
-
-      if (forceReelModal) {
-        this.openReelCueModal(videoAsset, { mode: 'append' });
-        return;
-      }
-
-      this.openSingleVideoActionModal(videoAsset);
+      const videoAsset = await this.ingestMediaFilePreferDesktop(file, 'video');
+      this.routeIngestedReelVideoAsset(videoAsset, forceReelModal);
     } catch (err) {
       this.store.notify(
         err instanceof Error ? err.message : t('notify.videoUnsupported'),
@@ -4733,12 +4986,12 @@ export class MotionPresentationApp {
   }
 
   private triggerRelinkVideo(targetSlideIds: string | string[]): void {
-    if (window.desktopAPI?.openMediaDialog) {
+    if (window.desktopAPI?.openMediaPathsDialog || window.desktopAPI?.openMediaDialog) {
       void (async () => {
         try {
-          const file = await this.pickVideoViaDesktop();
-          if (file) {
-            await this.performVideoRelink(targetSlideIds, file);
+          const videoAsset = await this.pickVideoAssetViaDesktop();
+          if (videoAsset) {
+            await this.relinkVideoAsset(targetSlideIds, videoAsset);
           }
         } catch (err) {
           this.store.notify(
@@ -4758,27 +5011,34 @@ export class MotionPresentationApp {
   private async performVideoRelink(target: string | string[], file: File): Promise<void> {
     try {
       this.store.notify(t('notify.relinkingVideo', { name: file.name }), 'info', 3000);
-      const videoAsset = await MediaValidator.ingestFile(file, 'video');
-      const count = await this.store.relinkReelVideo(target, videoAsset, {
-        reextractMissingImages: true,
-        onProgress: (done, total) => {
-          this.store.notify(
-            t('notify.restoringFrames', { done, total }),
-            'info',
-            2500
-          );
-        },
-      });
-      this.store.notify(
-        t('notify.relinkUpdatedSlides', { count: this.formatArabicSlideCount(count) }),
-        'success'
-      );
+      const videoAsset = await this.ingestMediaFilePreferDesktop(file, 'video');
+      await this.relinkVideoAsset(target, videoAsset);
     } catch (err) {
       this.store.notify(
         err instanceof Error ? err.message : t('notify.relinkCannot'),
         'error'
       );
     }
+  }
+
+  private async relinkVideoAsset(
+    target: string | string[],
+    videoAsset: MediaAsset
+  ): Promise<void> {
+    const count = await this.store.relinkReelVideo(target, videoAsset, {
+      reextractMissingImages: true,
+      onProgress: (done, total) => {
+        this.store.notify(
+          t('notify.restoringFrames', { done, total }),
+          'info',
+          2500
+        );
+      },
+    });
+    this.store.notify(
+      t('notify.relinkUpdatedSlides', { count: this.formatArabicSlideCount(count) }),
+      'success'
+    );
   }
 
   public handleDeleteAction(

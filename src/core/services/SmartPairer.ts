@@ -102,9 +102,18 @@ export interface BuildCueSlidesOptions {
   signal?: AbortSignal;
 }
 
+export interface BatchMediaDescriptor {
+  fileName: string;
+  mimeType: string;
+  size: number;
+  path: string;
+  url: string;
+}
+
 export interface BatchProcessOptions {
   onProgress?: (done: number, total: number, fileName: string) => void;
   signal?: AbortSignal;
+  resolveMediaSource?: (file: File) => { path: string; url: string; size?: number } | null;
 }
 
 /**
@@ -145,7 +154,7 @@ export class SmartPairer {
         options.onProgress?.(idx, totalFiles, file.name);
 
         const check = MediaValidator.validateFile(file);
-        if (!check.valid) {
+        if (!check.valid || !check.kind) {
           rejectedFiles.push({
             name: file.name,
             reason: check.errorReason || t('core.invalidFile'),
@@ -154,7 +163,20 @@ export class SmartPairer {
         }
 
         try {
-          const asset = await MediaValidator.ingestFile(file, undefined, options.signal);
+          const resolved = options.resolveMediaSource?.(file) || null;
+          const asset = resolved
+            ? await MediaValidator.ingestFromUrl(
+                resolved.url,
+                check.kind,
+                {
+                  fileName: file.name,
+                  mimeType: file.type || '',
+                  size: resolved.size ?? file.size,
+                  source: { kind: 'file', path: resolved.path },
+                },
+                options.signal
+              )
+            : await MediaValidator.ingestFile(file, undefined, options.signal);
           if (asset.kind === 'image') {
             imageAssets.push(asset);
           } else {
@@ -170,6 +192,120 @@ export class SmartPairer {
       }
 
       options.onProgress?.(totalFiles, totalFiles, '');
+
+      return await this.pairIngestedAssets(
+        imageAssets,
+        videoAssets,
+        rejectedFiles,
+        existingSlidesCount,
+        defaultFallback,
+        options
+      );
+    } catch (err) {
+      cleanupOnAbort();
+      throw err;
+    }
+  }
+
+  /**
+   * Desktop path-based batch import: ingests registered `mpres://file/...` URLs
+   * without reading media bytes into JS memory.
+   */
+  static async processBatchMediaDescriptors(
+    descriptors: BatchMediaDescriptor[],
+    existingSlidesCount: number,
+    defaultFallback: FallbackTransitionStyle = 'crossfade',
+    options: BatchProcessOptions = {}
+  ): Promise<{
+    newSlides: SlideNode[];
+    unpairedVideos: MediaAsset[];
+    report: BatchImportReport;
+  }> {
+    MediaValidator.throwIfAborted(options.signal);
+
+    const sorted = [...descriptors].sort((a, b) =>
+      naturalCollator.compare(a.fileName, b.fileName)
+    );
+
+    const imageAssets: MediaAsset[] = [];
+    const videoAssets: MediaAsset[] = [];
+    const rejectedFiles: Array<{ name: string; reason: string }> = [];
+    const totalFiles = sorted.length;
+
+    const cleanupOnAbort = () => {
+      for (const a of imageAssets) MediaValidator.revokeAssetUrls(a);
+      for (const a of videoAssets) MediaValidator.revokeAssetUrls(a);
+    };
+
+    try {
+      for (let idx = 0; idx < sorted.length; idx++) {
+        MediaValidator.throwIfAborted(options.signal);
+        const desc = sorted[idx];
+        options.onProgress?.(idx, totalFiles, desc.fileName);
+
+        const check = MediaValidator.validateDescriptor(desc.fileName, desc.mimeType, desc.size);
+        if (!check.valid || !check.kind) {
+          rejectedFiles.push({
+            name: desc.fileName,
+            reason: check.errorReason || t('core.invalidFile'),
+          });
+          continue;
+        }
+
+        try {
+          const asset = await MediaValidator.ingestFromUrl(
+            desc.url,
+            check.kind,
+            {
+              fileName: desc.fileName,
+              mimeType: desc.mimeType,
+              size: desc.size,
+              source: { kind: 'file', path: desc.path },
+            },
+            options.signal
+          );
+          if (asset.kind === 'image') {
+            imageAssets.push(asset);
+          } else {
+            videoAssets.push(asset);
+          }
+        } catch (err) {
+          if (MediaValidator.isAbortError(err)) throw err;
+          rejectedFiles.push({
+            name: desc.fileName,
+            reason: err instanceof Error ? err.message : t('core.fileReadError'),
+          });
+        }
+      }
+
+      options.onProgress?.(totalFiles, totalFiles, '');
+
+      return await this.pairIngestedAssets(
+        imageAssets,
+        videoAssets,
+        rejectedFiles,
+        existingSlidesCount,
+        defaultFallback,
+        options
+      );
+    } catch (err) {
+      cleanupOnAbort();
+      throw err;
+    }
+  }
+
+  private static async pairIngestedAssets(
+    imageAssets: MediaAsset[],
+    videoAssets: MediaAsset[],
+    rejectedFiles: Array<{ name: string; reason: string }>,
+    existingSlidesCount: number,
+    defaultFallback: FallbackTransitionStyle,
+    options: BatchProcessOptions
+  ): Promise<{
+    newSlides: SlideNode[];
+    unpairedVideos: MediaAsset[];
+    report: BatchImportReport;
+  }> {
 
       const newSlides: SlideNode[] = [];
       const unpairedVideos: MediaAsset[] = [];
@@ -425,10 +561,6 @@ export class SmartPairer {
           rejectedFiles,
         },
       };
-    } catch (err) {
-      cleanupOnAbort();
-      throw err;
-    }
   }
 
   static parseIndicesFromFilename(name: string): { fromIndex: number; toIndex?: number } | null {

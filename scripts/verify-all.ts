@@ -1623,6 +1623,19 @@ console.log('\n[Test 33b] Bundle Compatibility & Legacy Fixtures Suite (Phase 0)
 const { runBundleCompatTests } = await import('../test/bundle-compat.test');
 const compatRes = await runSuiteStrict('Bundle Compatibility (Phase 0)', runBundleCompatTests);
 
+// 7. Phase 1: Atomic Writes, Path Registry & Streaming Bundle Suite
+console.log('\n[Test 34] Atomic Write & Backup Suite (Phase 1)');
+const { runAtomicWriteTests } = await import('../test/atomic-write.test');
+const atomicRes = await runSuiteStrict('Atomic Writes (Phase 1)', runAtomicWriteTests);
+
+console.log('\n[Test 35] Path Registry Security Suite (Phase 1)');
+const { runPathRegistryTests } = await import('../test/path-registry.test');
+const regRes = await runSuiteStrict('Path Registry (Phase 1)', runPathRegistryTests);
+
+console.log('\n[Test 36] Streaming ZIP & mpres:// Protocol Suite (Phase 1)');
+const { runBundleStreamTests } = await import('../test/bundle-stream.test');
+const streamRes = await runSuiteStrict('Streaming ZIP & Protocol (Phase 1)', runBundleStreamTests);
+
 console.log('[Test 33] MotionReelImporter native /motion-reel metadata & cue mapping');
 {
   const filmJson = JSON.stringify({
@@ -1826,6 +1839,9 @@ console.log(`[Tier 1 & 2] Build Integrity (F9): ${buildRes.passed}/${buildRes.pa
 console.log(`[Tier 3] Pairwise Interactions: ${pairRes.passed}/${pairRes.passed + pairRes.failed} Passed`);
 console.log(`[Tier 4] Real-World Scenarios: ${scenRes.passed}/${scenRes.passed + scenRes.failed} Passed`);
 console.log(`[Phase 0] Bundle Compatibility: ${compatRes.passed}/${compatRes.passed + compatRes.failed} Passed`);
+console.log(`[Phase 1] Atomic Writes: ${atomicRes.passed}/${atomicRes.passed + atomicRes.failed} Passed`);
+console.log(`[Phase 1] Path Registry: ${regRes.passed}/${regRes.passed + regRes.failed} Passed`);
+console.log(`[Phase 1] Streaming ZIP & Protocol: ${streamRes.passed}/${streamRes.passed + streamRes.failed} Passed`);
 console.log('------------------------------------------------------');
 console.log(`GRAND TOTAL: ${grandTotalPassed}/${grandTotalTests} Passed (${Math.round((grandTotalPassed / grandTotalTests) * 100)}%)`);
 console.log('======================================================\n');

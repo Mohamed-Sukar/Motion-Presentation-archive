@@ -50,6 +50,10 @@ export interface MediaAsset {
   suggestedAspectRatio?: AspectRatioOption;
   sourceVideoId?: string;
   sourceTimeSec?: number;
+  source?:
+    | { kind: 'file'; path: string }
+    | { kind: 'archive'; projectToken: string; archiveEntry: string }
+    | { kind: 'memory' };
 }
 
 export interface TransitionSpec {

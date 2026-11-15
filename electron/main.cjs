@@ -1,7 +1,40 @@
-const { app, BrowserWindow, ipcMain, Menu, dialog, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, dialog, nativeTheme, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { extractProjectPathFromArgv, isSupportedProjectFile } = require('./argvHelper.cjs');
+const {
+  approveProjectPath,
+  isApprovedProjectPath,
+  approveMediaPath,
+  isApprovedMediaPath,
+} = require('./lib/pathRegistry.cjs');
+const { writeAtomic, writeBufferAtomic } = require('./lib/atomicWrite.cjs');
+const { indexBundle } = require('./lib/bundleIndex.cjs');
+const { writeBundleToFile } = require('./lib/bundleWriter.cjs');
+const {
+  setCacheBaseDir,
+  registerArchiveToken,
+  updateArchiveToken,
+  getArchiveEntryRef,
+  closeArchiveToken,
+  registerMediaFile,
+  handleMpresRequest,
+} = require('./lib/mediaProtocol.cjs');
+
+// Register mpres:// as a privileged streaming scheme before app is ready
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'mpres',
+    privileges: {
+      standard: true,
+      secure: true,
+      stream: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      bypassCSP: true,
+    },
+  },
+]);
 
 let mainWindow = null;
 let rendererReady = false;
@@ -47,12 +80,17 @@ const MENU_TEXT = {
     openProjectTitle: 'فتح ملف مشروع العرض الحركي',
     saveProjectTitle: 'حفظ ملف العرض التقديمي',
     importMediaTitle: 'استيراد وسائط العرض (صور وفيديوهات)',
-    invalidSavePath: 'مسار الحفظ غير صالح.',
+    invalidSavePath: 'مسار الحفظ غير صالح أو غير مصرح به.',
     projectFilterLabel: 'مشروع عرض حركي',
     mediaFilesFilter: 'ملفات الوسائط',
     imagesFilter: 'الصور',
     videosFilter: 'الفيديوهات',
     allFilesFilter: 'كافة الملفات',
+    backupFoundTitle: 'استعادة نسخة احتياطية للمشروع',
+    backupFoundMessage: 'تعذّر قراءة ملف المشروع، لكن تم العثور على نسخة احتياطية (.bak) من آخر حفظ مكتمل.',
+    backupFoundDetail: 'هل تريد استعادة النسخة الاحتياطية وفتح المشروع؟',
+    backupRestoreBtn: 'استعادة وفتح',
+    backupCancelBtn: 'إلغاء',
   },
   en: {
     file: 'File',
@@ -75,12 +113,17 @@ const MENU_TEXT = {
     openProjectTitle: 'Open Motion Presentation Project',
     saveProjectTitle: 'Save Presentation Project',
     importMediaTitle: 'Import Presentation Media (Images & Videos)',
-    invalidSavePath: 'Invalid save file path.',
+    invalidSavePath: 'Invalid or unapproved save file path.',
     projectFilterLabel: 'Motion Presentation Project',
     mediaFilesFilter: 'Media Files',
     imagesFilter: 'Images',
     videosFilter: 'Videos',
     allFilesFilter: 'All Files',
+    backupFoundTitle: 'Restore Project Backup',
+    backupFoundMessage: 'The project file could not be opened, but a valid backup (.bak) from the last completed save was found.',
+    backupFoundDetail: 'Restore the backup and open the project?',
+    backupRestoreBtn: 'Restore & Open',
+    backupCancelBtn: 'Cancel',
   },
 };
 
@@ -88,12 +131,88 @@ function toArrayBuffer(buf) {
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 }
 
-async function readProjectFilePayload(filePath) {
-  const buf = await fs.promises.readFile(filePath);
+function normalizeFinalMpresPath(targetPath) {
+  const cleanBase = String(targetPath).replace(/(\.mpres\.json|\.json)$/i, '');
+  return cleanBase.toLowerCase().endsWith('.mpres') ? cleanBase : `${cleanBase}.mpres`;
+}
+
+/**
+ * Indexes a project file for zero-copy `mpres://` streaming, offering `.bak` recovery if needed.
+ */
+async function openProjectStreaming(filePath) {
+  const resolved = path.resolve(filePath);
+  const bakPath = `${resolved}.bak`;
+  let indexResult;
+  let recoveredFromBackup = false;
+
+  try {
+    indexResult = await indexBundle(resolved);
+  } catch (primaryErr) {
+    if (fs.existsSync(bakPath)) {
+      let bakIndex;
+      try {
+        bakIndex = await indexBundle(bakPath);
+      } catch {
+        bakIndex = null;
+      }
+
+      if (bakIndex) {
+        const L = MENU_TEXT[getActiveLanguage()];
+        const choice = mainWindow && !mainWindow.isDestroyed()
+          ? await dialog.showMessageBox(mainWindow, {
+              type: 'warning',
+              title: L.backupFoundTitle,
+              message: L.backupFoundMessage,
+              detail: `${L.backupFoundDetail}\n(${path.basename(bakPath)})`,
+              buttons: [L.backupRestoreBtn, L.backupCancelBtn],
+              defaultId: 0,
+              cancelId: 1,
+            })
+          : { response: 1 };
+
+        if (choice.response === 0) {
+          await writeAtomic(
+            resolved,
+            async (tmpPath) => {
+              await fs.promises.copyFile(bakPath, tmpPath);
+              const fh = await fs.promises.open(tmpPath, 'r+');
+              try {
+                await fh.sync();
+              } finally {
+                await fh.close();
+              }
+            },
+            {
+              keepBackup: false,
+              verifyFn: async (tmpPath) => {
+                await indexBundle(tmpPath);
+              },
+            }
+          );
+          indexResult = await indexBundle(resolved);
+          recoveredFromBackup = true;
+        } else {
+          throw primaryErr;
+        }
+      } else {
+        throw primaryErr;
+      }
+    } else {
+      throw primaryErr;
+    }
+  }
+
+  const { projectToken, assets } = registerArchiveToken(resolved, indexResult);
+  approveProjectPath(resolved);
+
   return {
-    filePath,
-    fileName: path.basename(filePath),
-    buffer: toArrayBuffer(buf),
+    projectToken,
+    filePath: resolved,
+    fileName: path.basename(resolved),
+    format: indexResult.format,
+    manifestJson: indexResult.manifestJson,
+    assets,
+    recoveredFromBackup,
   };
 }
 
@@ -101,11 +220,11 @@ async function enqueueOrSendProjectFile(filePath) {
   if (!filePath || !isSupportedProjectFile(filePath)) return;
   if (mainWindow && rendererReady && !mainWindow.isDestroyed()) {
     try {
-      const payload = await readProjectFilePayload(filePath);
+      const payload = await openProjectStreaming(filePath);
       mainWindow.webContents.send('project:open-file', payload);
       return;
     } catch (err) {
-      console.error('Failed to read project file:', err);
+      console.error('Failed to open project file:', err);
     }
   }
   pendingProjectFilePath = filePath;
@@ -245,10 +364,15 @@ function createWindow() {
 }
 
 async function writeProjectToDisk(targetPath, payload) {
-  const cleanBase = targetPath.replace(/(\.mpres\.json|\.json)$/i, '');
-  const finalPath = cleanBase.toLowerCase().endsWith('.mpres') ? cleanBase : `${cleanBase}.mpres`;
+  const finalPath = normalizeFinalMpresPath(targetPath);
   const data = Buffer.from(payload.bundleBytes);
-  await fs.promises.writeFile(finalPath, data);
+  await writeBufferAtomic(finalPath, data, {
+    keepBackup: true,
+    verifyFn: async (tmpPath) => {
+      await indexBundle(tmpPath);
+    },
+  });
+  approveProjectPath(finalPath);
   return finalPath;
 }
 
@@ -325,12 +449,231 @@ if (!gotSingleInstanceLock) {
     pendingProjectFilePath = null;
     if (!nextPath) return null;
     try {
-      return await readProjectFilePayload(nextPath);
+      return await openProjectStreaming(nextPath);
     } catch {
       return null;
     }
   });
 
+  ipcMain.handle('project:open-dialog', async () => {
+    if (!mainWindow) return null;
+    const L = MENU_TEXT[getActiveLanguage()];
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: L.openProjectTitle,
+      properties: ['openFile'],
+      filters: [
+        { name: `${L.projectFilterLabel} (*.mpres, *.mpres.json)`, extensions: ['mpres', 'json'] },
+        { name: L.allFilesFilter, extensions: ['*'] },
+      ],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return await openProjectStreaming(result.filePaths[0]);
+  });
+
+  ipcMain.handle('project:save-streamed', async (_event, payload) => {
+    if (!mainWindow || !payload) return null;
+    const L = MENU_TEXT[getActiveLanguage()];
+    let targetPath;
+
+    if (payload.mode === 'direct') {
+      if (
+        typeof payload.filePath !== 'string' ||
+        !payload.filePath.trim() ||
+        !isApprovedProjectPath(payload.filePath)
+      ) {
+        throw new Error(L.invalidSavePath);
+      }
+      targetPath = normalizeFinalMpresPath(payload.filePath);
+    } else {
+      let defaultTarget =
+        payload.currentFilePath || payload.defaultFileName || 'presentation.mpres';
+      defaultTarget = normalizeFinalMpresPath(defaultTarget);
+      const result = await dialog.showSaveDialog(mainWindow, {
+        title: L.saveProjectTitle,
+        defaultPath: defaultTarget,
+        filters: [{ name: `${L.projectFilterLabel} (*.mpres)`, extensions: ['mpres'] }],
+      });
+      if (result.canceled || !result.filePath) return null;
+      targetPath = normalizeFinalMpresPath(result.filePath);
+    }
+
+    const rawAssets = Array.isArray(payload.assets) ? payload.assets : [];
+    const missingFiles = [];
+    const resolvedAssets = [];
+
+    for (const item of rawAssets) {
+      if (!item || typeof item.archivePath !== 'string') continue;
+      if (item.source === 'file') {
+        if (!item.path || !isApprovedMediaPath(item.path)) {
+          missingFiles.push({
+            archivePath: item.archivePath,
+            fileName: item.fileName || path.basename(String(item.path || item.archivePath)),
+            path: item.path || '',
+          });
+          continue;
+        }
+        resolvedAssets.push({
+          archivePath: item.archivePath,
+          source: 'file',
+          path: item.path,
+        });
+      } else if (item.source === 'archive') {
+        const ref = getArchiveEntryRef(item.projectToken, item.archiveEntry);
+        if (!ref) {
+          missingFiles.push({
+            archivePath: item.archivePath,
+            fileName: item.fileName || path.basename(item.archiveEntry || item.archivePath),
+            path: '',
+          });
+          continue;
+        }
+        resolvedAssets.push({
+          archivePath: item.archivePath,
+          source: 'archive',
+          bundlePath: ref.bundlePath,
+          archiveEntry: ref.archiveEntry,
+          dataOffset: ref.dataOffset,
+          size: ref.size,
+          compressionMethod: ref.compressionMethod,
+        });
+      } else if (item.source === 'bytes') {
+        resolvedAssets.push({
+          archivePath: item.archivePath,
+          source: 'bytes',
+          bytes: item.bytes,
+        });
+      }
+    }
+
+    if (missingFiles.length > 0) {
+      return {
+        ok: false,
+        code: 'MISSING_SOURCES',
+        missingFiles,
+      };
+    }
+
+    const emitProgress = (progress) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const percent = Math.min(
+          100,
+          Math.max(0, Math.round((progress.bytesWritten / Math.max(1, progress.totalBytes)) * 100))
+        );
+        mainWindow.webContents.send('project:save-progress', {
+          ...progress,
+          percent,
+        });
+      }
+    };
+
+    await writeAtomic(
+      targetPath,
+      (tmpPath) =>
+        writeBundleToFile(
+          tmpPath,
+          {
+            manifestJson: payload.manifestJson,
+            assets: resolvedAssets,
+          },
+          emitProgress
+        ),
+      {
+        keepBackup: true,
+        verifyFn: async (tmpPath) => {
+          await indexBundle(tmpPath);
+        },
+      }
+    );
+
+    const newIndex = await indexBundle(targetPath);
+    const updated = payload.activeProjectToken
+      ? updateArchiveToken(payload.activeProjectToken, targetPath, newIndex)
+      : registerArchiveToken(targetPath, newIndex);
+
+    approveProjectPath(targetPath);
+
+    return {
+      ok: true,
+      filePath: targetPath,
+      fileName: path.basename(targetPath),
+      projectToken: updated.projectToken,
+    };
+  });
+
+  ipcMain.handle('project:close-token', async (_event, projectToken) => {
+    if (typeof projectToken === 'string' && projectToken) {
+      await closeArchiveToken(projectToken);
+    }
+  });
+
+  ipcMain.handle('project:open-path', async (_event, filePath) => {
+    if (typeof filePath !== 'string' || !filePath.trim()) {
+      throw new Error(MENU_TEXT[getActiveLanguage()].invalidSavePath);
+    }
+    const resolved = path.resolve(filePath);
+    if (!isSupportedProjectFile(resolved)) {
+      throw new Error(MENU_TEXT[getActiveLanguage()].invalidSavePath);
+    }
+    const stat = await fs.promises.stat(resolved).catch(() => null);
+    if (!stat || !stat.isFile()) {
+      throw new Error(MENU_TEXT[getActiveLanguage()].invalidSavePath);
+    }
+    return await openProjectStreaming(resolved);
+  });
+
+  ipcMain.handle('media:open-dialog', async () => {
+    if (!mainWindow) return null;
+    const L = MENU_TEXT[getActiveLanguage()];
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: L.importMediaTitle,
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        {
+          name: L.mediaFilesFilter,
+          extensions: [
+            'png',
+            'jpg',
+            'jpeg',
+            'webp',
+            'avif',
+            'svg',
+            'bmp',
+            'mp4',
+            'webm',
+            'mov',
+            'm4v',
+            'mkv',
+            'ogv',
+          ],
+        },
+        { name: L.imagesFilter, extensions: ['png', 'jpg', 'jpeg', 'webp', 'avif', 'svg', 'bmp'] },
+        { name: L.videosFilter, extensions: ['mp4', 'webm', 'mov', 'm4v', 'mkv', 'ogv'] },
+        { name: L.allFilesFilter, extensions: ['*'] },
+      ],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+
+    const files = [];
+    for (const filePath of result.filePaths) {
+      const approved = approveMediaPath(filePath);
+      if (!approved) continue;
+      files.push(await registerMediaFile(approved));
+    }
+    return files;
+  });
+
+  ipcMain.handle('media:register-paths', async (_event, pathsList) => {
+    if (!Array.isArray(pathsList)) return [];
+    const results = [];
+    for (const rawPath of pathsList) {
+      const approved = approveMediaPath(rawPath);
+      if (!approved) continue;
+      results.push(await registerMediaFile(approved));
+    }
+    return results;
+  });
+
+  // Legacy wrappers kept for compatibility during transition
   ipcMain.handle('dialog:open-project', async () => {
     if (!mainWindow) return null;
     const L = MENU_TEXT[getActiveLanguage()];
@@ -343,24 +686,26 @@ if (!gotSingleInstanceLock) {
       ],
     });
     if (result.canceled || result.filePaths.length === 0) return null;
-    return await readProjectFilePayload(result.filePaths[0]);
+    const filePath = result.filePaths[0];
+    approveProjectPath(filePath);
+    const buf = await fs.promises.readFile(filePath);
+    return {
+      filePath,
+      fileName: path.basename(filePath),
+      buffer: toArrayBuffer(buf),
+    };
   });
 
   ipcMain.handle('dialog:save-project', async (_event, payload) => {
     if (!mainWindow || !payload) return null;
     const L = MENU_TEXT[getActiveLanguage()];
-    let defaultTarget = payload.currentFilePath || payload.defaultFileName || 'presentation.mpres';
-    if (/(\.mpres\.json|\.json)$/i.test(defaultTarget)) {
-      defaultTarget = defaultTarget.replace(/(\.mpres\.json|\.json)$/i, '.mpres');
-    } else if (!/\.mpres$/i.test(defaultTarget)) {
-      defaultTarget = `${defaultTarget}.mpres`;
-    }
+    const defaultTarget = normalizeFinalMpresPath(
+      payload.currentFilePath || payload.defaultFileName || 'presentation.mpres'
+    );
     const result = await dialog.showSaveDialog(mainWindow, {
       title: L.saveProjectTitle,
       defaultPath: defaultTarget,
-      filters: [
-        { name: `${L.projectFilterLabel} (*.mpres)`, extensions: ['mpres'] },
-      ],
+      filters: [{ name: `${L.projectFilterLabel} (*.mpres)`, extensions: ['mpres'] }],
     });
     if (result.canceled || !result.filePath) return null;
     const savedPath = await writeProjectToDisk(result.filePath, payload);
@@ -372,7 +717,12 @@ if (!gotSingleInstanceLock) {
 
   ipcMain.handle('project:save-direct', async (_event, payload) => {
     const L = MENU_TEXT[getActiveLanguage()];
-    if (!payload || typeof payload.filePath !== 'string' || !payload.filePath.trim()) {
+    if (
+      !payload ||
+      typeof payload.filePath !== 'string' ||
+      !payload.filePath.trim() ||
+      !isApprovedProjectPath(payload.filePath)
+    ) {
       throw new Error(L.invalidSavePath);
     }
     const savedPath = await writeProjectToDisk(payload.filePath, payload);
@@ -414,38 +764,27 @@ if (!gotSingleInstanceLock) {
     });
     if (result.canceled || result.filePaths.length === 0) return null;
 
-    const mimeMap = {
-      mp4: 'video/mp4',
-      m4v: 'video/mp4',
-      webm: 'video/webm',
-      mov: 'video/quicktime',
-      mkv: 'video/x-matroska',
-      ogv: 'video/ogg',
-      png: 'image/png',
-      jpg: 'image/jpeg',
-      jpeg: 'image/jpeg',
-      webp: 'image/webp',
-      avif: 'image/avif',
-      svg: 'image/svg+xml',
-      bmp: 'image/bmp',
-    };
-
     const files = [];
     for (const filePath of result.filePaths) {
-      const buf = await fs.promises.readFile(filePath);
-      const fileName = path.basename(filePath);
-      const ext = path.extname(filePath).toLowerCase().replace('.', '');
-      const mimeType = mimeMap[ext] || 'application/octet-stream';
+      const approved = approveMediaPath(filePath);
+      if (!approved) continue;
+      const buf = await fs.promises.readFile(approved);
+      const reg = await registerMediaFile(approved);
       files.push({
-        fileName,
-        mimeType,
+        fileName: reg.fileName,
+        mimeType: reg.mimeType,
         buffer: toArrayBuffer(buf),
+        path: reg.path,
+        url: reg.url,
       });
     }
     return files;
   });
 
   app.whenReady().then(() => {
+    setCacheBaseDir(path.join(app.getPath('userData'), 'media-cache'));
+    protocol.handle('mpres', (request) => handleMpresRequest(request));
+
     createWindow();
 
     app.on('activate', () => {

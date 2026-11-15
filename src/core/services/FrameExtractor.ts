@@ -66,7 +66,7 @@ export class FrameExtractor {
     video.preload = 'auto';
     video.muted = true;
     video.playsInline = true;
-    if (/^https?:\/\//i.test(videoAsset.objectUrl)) {
+    if (/^(https?|mpres):\/\//i.test(videoAsset.objectUrl)) {
       video.crossOrigin = 'anonymous';
     }
 

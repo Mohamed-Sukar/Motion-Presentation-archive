@@ -1741,6 +1741,9 @@ export class StagePlaybackEngine {
       video.preload = 'auto';
       video.muted = true;
       video.playsInline = true;
+      if (/^(https?|mpres):\/\//i.test(videoAsset.objectUrl)) {
+        video.crossOrigin = 'anonymous';
+      }
 
       try {
         video.src = videoAsset.objectUrl;
@@ -1901,6 +1904,9 @@ export class StagePlaybackEngine {
       }
 
       const img = new Image();
+      if (/^(https?|mpres):\/\//i.test(objectUrl)) {
+        img.crossOrigin = 'anonymous';
+      }
       let settled = false;
       const done = () => {
         if (settled) return;
@@ -1981,6 +1987,9 @@ export class StagePlaybackEngine {
       }
 
       if (video.src !== objectUrl) {
+        if (/^(https?|mpres):\/\//i.test(objectUrl)) {
+          video.crossOrigin = 'anonymous';
+        }
         video.src = objectUrl;
         video.load();
       } else if (video.readyState >= 2) {

@@ -24,6 +24,11 @@ import {
   LoadedProjectBundle,
   ProjectSerializer,
 } from '../services/ProjectSerializer';
+import {
+  OpenedProjectAssetEntry,
+  OpenedProjectDescriptor,
+  projectFiles,
+} from '../services/ProjectFileService';
 import { SmartPairer } from '../services/SmartPairer';
 import { AppLanguage, t } from '../i18n';
 
@@ -102,6 +107,7 @@ export class PresentationStore {
   private readonly maxHistoryDepth = 40;
   private isRecordingSuppressed = false;
   private revokedBlobUrls = new Set<string>();
+  private currentProjectToken: string | null = null;
 
   constructor() {
     this.project = createEmptyProject();
@@ -161,6 +167,19 @@ export class PresentationStore {
 
   getNotification() {
     return this.notification;
+  }
+
+  getProjectToken(): string | null {
+    return this.currentProjectToken;
+  }
+
+  setProjectToken(token: string | null): void {
+    const prev = this.currentProjectToken;
+    const next = token || null;
+    this.currentProjectToken = next;
+    if (prev && prev !== next) {
+      void projectFiles.closeToken(prev);
+    }
   }
 
   notify(
@@ -1956,6 +1975,7 @@ export class PresentationStore {
     this.project.slides = [];
     this.project.reelMetadata = undefined;
     this.project.aiSourceMeta = undefined;
+    this.setProjectToken(null);
     this.revokeUrlsIfUnused(urlsToCheck);
     StagePlaybackEngine.invalidateReverseFrames(keysToInvalidate);
     this.activePreviewIndex = 0;
@@ -1970,6 +1990,139 @@ export class PresentationStore {
     };
     ProjectSerializer.saveSettingsToLocal(this.project.settings);
     this.emit('settings');
+  }
+
+  async loadOpenedDesktopProject(opened: OpenedProjectDescriptor): Promise<DeserializedProjectData> {
+    const projectData = ProjectSerializer.deserializeProject(opened.manifestJson);
+
+    if (opened.format !== 'mpres-bundle' || typeof document === 'undefined') {
+      this.setProjectToken(opened.projectToken || null);
+      this.loadProjectFromManifest(projectData, {
+        skipCacheHydration: opened.format === 'mpres-bundle',
+        preserveProjectToken: true,
+      });
+      return projectData;
+    }
+
+    const entryByPath = new Map<string, OpenedProjectAssetEntry>();
+    for (const asset of opened.assets) {
+      entryByPath.set(asset.archivePath, asset);
+    }
+
+    const imageTasks: Array<{ archivePath: string; fileName: string; entry: OpenedProjectAssetEntry }> =
+      [];
+    const videoTasks: Array<{ archivePath: string; fileName: string; entry: OpenedProjectAssetEntry }> =
+      [];
+    const seenImages = new Set<string>();
+    const seenVideos = new Set<string>();
+
+    const fallbackName = (archivePath: string) =>
+      archivePath.split('/').pop() || archivePath || 'asset';
+
+    for (const sd of projectData.slidesData) {
+      if (sd.imageArchivePath && !seenImages.has(sd.imageArchivePath)) {
+        const entry = entryByPath.get(sd.imageArchivePath);
+        if (entry) {
+          seenImages.add(sd.imageArchivePath);
+          imageTasks.push({
+            archivePath: sd.imageArchivePath,
+            fileName: sd.imageFileName || fallbackName(sd.imageArchivePath),
+            entry,
+          });
+        }
+      }
+
+      const tr = sd.transitionToNext;
+      if (tr?.videoArchivePath && !seenVideos.has(tr.videoArchivePath)) {
+        const entry = entryByPath.get(tr.videoArchivePath);
+        if (entry) {
+          seenVideos.add(tr.videoArchivePath);
+          videoTasks.push({
+            archivePath: tr.videoArchivePath,
+            fileName: tr.videoFileName || fallbackName(tr.videoArchivePath),
+            entry,
+          });
+        }
+      }
+
+      if (sd.idleLoopArchivePath && !seenVideos.has(sd.idleLoopArchivePath)) {
+        const entry = entryByPath.get(sd.idleLoopArchivePath);
+        if (entry) {
+          seenVideos.add(sd.idleLoopArchivePath);
+          videoTasks.push({
+            archivePath: sd.idleLoopArchivePath,
+            fileName: sd.idleLoopFileName || fallbackName(sd.idleLoopArchivePath),
+            entry,
+          });
+        }
+      }
+    }
+
+    const imageMap = new Map<string, MediaAsset>();
+    const videoMap = new Map<string, MediaAsset>();
+
+    const runWithConcurrency = async <T>(
+      items: T[],
+      concurrency: number,
+      worker: (item: T) => Promise<void>
+    ): Promise<void> => {
+      if (items.length === 0) return;
+      let cursor = 0;
+      const workerCount = Math.min(concurrency, items.length);
+      await Promise.all(
+        Array.from({ length: workerCount }, async () => {
+          while (cursor < items.length) {
+            const idx = cursor++;
+            await worker(items[idx]);
+          }
+        })
+      );
+    };
+
+    await runWithConcurrency(imageTasks, 4, async (task) => {
+      try {
+        const asset = await MediaValidator.ingestFromUrl(task.entry.url, 'image', {
+          fileName: task.fileName,
+          mimeType: task.entry.mimeType,
+          size: task.entry.size,
+          source: {
+            kind: 'archive',
+            projectToken: opened.projectToken,
+            archiveEntry: task.archivePath,
+          },
+        });
+        imageMap.set(task.archivePath, asset);
+      } catch {
+        // Fallback to thumbnail in manifest if image decode fails
+      }
+    });
+
+    await runWithConcurrency(videoTasks, 4, async (task) => {
+      try {
+        const asset = await MediaValidator.ingestFromUrl(task.entry.url, 'video', {
+          fileName: task.fileName,
+          mimeType: task.entry.mimeType,
+          size: task.entry.size,
+          source: {
+            kind: 'archive',
+            projectToken: opened.projectToken,
+            archiveEntry: task.archivePath,
+          },
+        });
+        videoMap.set(task.archivePath, asset);
+      } catch {
+        // Leave expectedVideoFileName for relink UI if video decode fails
+      }
+    });
+
+    this.setProjectToken(opened.projectToken || null);
+    this.loadProjectFromManifest(projectData, {
+      skipCacheHydration: true,
+      preserveProjectToken: true,
+      preloadedAssets: { imageMap, videoMap },
+    });
+
+    return projectData;
   }
 
   async loadProjectBundle(bundle: LoadedProjectBundle): Promise<void> {
@@ -2026,6 +2179,7 @@ export class PresentationStore {
     },
     options?: {
       skipCacheHydration?: boolean;
+      preserveProjectToken?: boolean;
       preloadedAssets?: {
         imageMap: Map<string, MediaAsset>;
         videoMap: Map<string, MediaAsset>;
@@ -2033,6 +2187,9 @@ export class PresentationStore {
     }
   ): void {
     this.clearHistory();
+    if (!options?.preserveProjectToken) {
+      this.setProjectToken(null);
+    }
     const oldUrls: Array<string | undefined> = [];
     const oldReverseKeys: string[] = [];
     for (const s of this.project.slides) {

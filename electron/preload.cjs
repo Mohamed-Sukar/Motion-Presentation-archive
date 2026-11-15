@@ -8,14 +8,25 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   getSystemLocale: () => ipcRenderer.invoke('app:get-locale'),
   setLanguage: (lang) => ipcRenderer.invoke('app:set-language', lang),
   setTheme: (themePref) => ipcRenderer.invoke('app:set-theme', themePref),
-  openProjectDialog: () => ipcRenderer.invoke('dialog:open-project'),
-  saveProjectDialog: (payload) => ipcRenderer.invoke('dialog:save-project', payload),
-  saveProjectDirect: (payload) => ipcRenderer.invoke('project:save-direct', payload),
+
+  // Streaming open/save & mpres:// media channels (Phase 1)
+  openProjectStreamedDialog: () => ipcRenderer.invoke('project:open-dialog'),
+  openProjectByPath: (filePath) => ipcRenderer.invoke('project:open-path', filePath),
+  saveProjectStreamed: (payload) => ipcRenderer.invoke('project:save-streamed', payload),
+  closeProjectToken: (projectToken) => ipcRenderer.invoke('project:close-token', projectToken),
+  onSaveProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on('project:save-progress', listener);
+    return () => ipcRenderer.removeListener('project:save-progress', listener);
+  },
+  openMediaPathsDialog: () => ipcRenderer.invoke('media:open-dialog'),
+  registerMediaPaths: (pathsList) => ipcRenderer.invoke('media:register-paths', pathsList),
+
+  // Startup / OS file association channels
   consumePendingProjectFile: () => ipcRenderer.invoke('project:consume-pending'),
   onOpenProjectFile: (callback) => {
     ipcRenderer.on('project:open-file', (_event, payload) => callback(payload));
   },
-  openMediaDialog: () => ipcRenderer.invoke('dialog:open-media'),
   onMenuCommand: (callback) => {
     ipcRenderer.on('menu:command', (_event, cmd) => callback(cmd));
   },
@@ -26,4 +37,10 @@ contextBridge.exposeInMainWorld('desktopAPI', {
       return null;
     }
   },
+
+  // Legacy channels kept during transition
+  openProjectDialog: () => ipcRenderer.invoke('dialog:open-project'),
+  saveProjectDialog: (payload) => ipcRenderer.invoke('dialog:save-project', payload),
+  saveProjectDirect: (payload) => ipcRenderer.invoke('project:save-direct', payload),
+  openMediaDialog: () => ipcRenderer.invoke('dialog:open-media'),
 });

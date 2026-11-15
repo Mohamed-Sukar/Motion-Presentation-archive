@@ -78,6 +78,18 @@ export interface LoadedProjectBundle {
   format: 'mpres-bundle' | 'manifest-json';
 }
 
+export interface PlannedArchiveItem {
+  archivePath: string;
+  asset: MediaAsset;
+  kind: 'image' | 'video';
+}
+
+export interface PlannedArchiveLayout {
+  items: PlannedArchiveItem[];
+  imagePaths: Map<string, string>;
+  videoPaths: Map<string, string>;
+}
+
 interface StoredBlobRecord {
   key: string;
   blob: Blob;
@@ -201,61 +213,83 @@ export class ProjectSerializer {
     };
   }
 
-  static async buildBundleBytes(project: PresentationProject): Promise<Uint8Array> {
-    const archiveEntries: Record<string, Uint8Array> = {};
+  /**
+   * Computes deterministic archive entry paths for all packable slide, transition,
+   * and idle-loop assets so browser ZIP writes and desktop streaming saves match.
+   */
+  static planArchiveLayout(project: PresentationProject): PlannedArchiveLayout {
+    const items: PlannedArchiveItem[] = [];
     const imagePaths = new Map<string, string>();
     const videoPaths = new Map<string, string>();
 
     let imageCounter = 0;
     let videoCounter = 0;
 
+    const isPackable = (asset: MediaAsset | null | undefined): asset is MediaAsset => {
+      if (!asset) return false;
+      if (asset.source?.kind === 'file' || asset.source?.kind === 'archive') return true;
+      if (asset.rawFile && asset.rawFile.size > 0) return true;
+      return Boolean(asset.objectUrl);
+    };
+
     for (const slide of project.slides) {
       const img = slide.imageAsset;
-      if (img && !imagePaths.has(img.id)) {
-        const bytes = await this.readAssetBytes(img);
-        if (bytes && bytes.byteLength > 0) {
-          imageCounter += 1;
-          const ext = this.sanitizeExtension(img.name, img.extension || 'png');
-          const entryPath = `assets/images/slide_${String(imageCounter).padStart(3, '0')}.${ext}`;
-          archiveEntries[entryPath] = bytes;
-          imagePaths.set(img.id, entryPath);
-        }
+      if (isPackable(img) && !imagePaths.has(img.id)) {
+        imageCounter += 1;
+        const ext = this.sanitizeExtension(img.name, img.extension || 'png');
+        const entryPath = `assets/images/slide_${String(imageCounter).padStart(3, '0')}.${ext}`;
+        imagePaths.set(img.id, entryPath);
+        items.push({ archivePath: entryPath, asset: img, kind: 'image' });
       }
 
       const vid = slide.transitionToNext?.videoAsset;
-      if (vid) {
+      if (isPackable(vid)) {
         const key = this.getAssetDedupKey(vid);
         if (!videoPaths.has(key)) {
-          const bytes = await this.readAssetBytes(vid);
-          if (bytes && bytes.byteLength > 0) {
-            videoCounter += 1;
-            const ext = this.sanitizeExtension(vid.name, vid.extension || 'mp4');
-            const entryPath = `assets/videos/video_${String(videoCounter).padStart(3, '0')}.${ext}`;
-            archiveEntries[entryPath] = bytes;
-            videoPaths.set(key, entryPath);
-          }
+          videoCounter += 1;
+          const ext = this.sanitizeExtension(vid.name, vid.extension || 'mp4');
+          const entryPath = `assets/videos/video_${String(videoCounter).padStart(3, '0')}.${ext}`;
+          videoPaths.set(key, entryPath);
+          items.push({ archivePath: entryPath, asset: vid, kind: 'video' });
         }
       }
 
       const loopVid = slide.idleLoopAsset;
-      if (loopVid) {
+      if (isPackable(loopVid)) {
         const key = this.getAssetDedupKey(loopVid);
         if (!videoPaths.has(key)) {
-          const bytes = await this.readAssetBytes(loopVid);
-          if (bytes && bytes.byteLength > 0) {
-            videoCounter += 1;
-            const ext = this.sanitizeExtension(loopVid.name, loopVid.extension || 'mp4');
-            const entryPath = `assets/videos/video_${String(videoCounter).padStart(3, '0')}.${ext}`;
-            archiveEntries[entryPath] = bytes;
-            videoPaths.set(key, entryPath);
-          }
+          videoCounter += 1;
+          const ext = this.sanitizeExtension(loopVid.name, loopVid.extension || 'mp4');
+          const entryPath = `assets/videos/video_${String(videoCounter).padStart(3, '0')}.${ext}`;
+          videoPaths.set(key, entryPath);
+          items.push({ archivePath: entryPath, asset: loopVid, kind: 'video' });
         }
       }
     }
 
+    return { items, imagePaths, videoPaths };
+  }
+
+  static async buildBundleBytes(project: PresentationProject): Promise<Uint8Array> {
+    const archiveEntries: Record<string, Uint8Array> = {};
+    const layout = this.planArchiveLayout(project);
+    const includedImages = new Map(layout.imagePaths);
+    const includedVideos = new Map(layout.videoPaths);
+
+    for (const item of layout.items) {
+      const bytes = await this.readAssetBytes(item.asset);
+      if (bytes && bytes.byteLength > 0) {
+        archiveEntries[item.archivePath] = bytes;
+      } else if (item.kind === 'image') {
+        includedImages.delete(item.asset.id);
+      } else {
+        includedVideos.delete(this.getAssetDedupKey(item.asset));
+      }
+    }
+
     const manifest = this.buildManifestObject(project, undefined, {
-      images: imagePaths,
-      videos: videoPaths,
+      images: includedImages,
+      videos: includedVideos,
     });
     archiveEntries['manifest.json'] = strToU8(JSON.stringify(manifest, null, 2));
 
@@ -402,7 +436,7 @@ export class ProjectSerializer {
     return vidMap[ext] || 'video/mp4';
   }
 
-  private static async readAssetBytes(asset: MediaAsset): Promise<Uint8Array | null> {
+  static async readAssetBytes(asset: MediaAsset): Promise<Uint8Array | null> {
     try {
       if (asset.rawFile && asset.rawFile.size > 0) {
         return new Uint8Array(await asset.rawFile.arrayBuffer());
@@ -423,7 +457,11 @@ export class ProjectSerializer {
         return strToU8(decodeURIComponent(body));
       }
 
-      if (asset.objectUrl.startsWith('blob:') || asset.objectUrl.startsWith('http')) {
+      if (
+        asset.objectUrl.startsWith('blob:') ||
+        asset.objectUrl.startsWith('http') ||
+        asset.objectUrl.startsWith('mpres://')
+      ) {
         const resp = await fetch(asset.objectUrl);
         if (!resp.ok) return null;
         return new Uint8Array(await resp.arrayBuffer());
@@ -521,7 +559,16 @@ export class ProjectSerializer {
   }
 
   static async cacheProjectAssetsToLocalDb(project: PresentationProject): Promise<void> {
-    if (typeof indexedDB === 'undefined') return;
+    if (
+      typeof indexedDB === 'undefined' ||
+      (typeof window !== 'undefined' &&
+        Boolean(
+          (window as unknown as { desktopAPI?: { isDesktopApp?: boolean } }).desktopAPI
+            ?.isDesktopApp
+        ))
+    ) {
+      return;
+    }
     try {
       const db = await this.openAssetDb();
       if (!db) return;
