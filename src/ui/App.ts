@@ -51,11 +51,38 @@ import {
   TranslationKey,
 } from '../core/i18n';
 import { PresentationStore, StoreChangeType } from '../core/state/PresentationStore';
+import { ComponentScope, escapeHtml } from './core/ComponentLifecycle';
+import {
+  renderWindowToolbarView,
+  syncToolbarUndoRedoState as syncToolbarUndoRedoView,
+} from './components/ToolbarView';
+import { renderEmptyStageView } from './components/EmptyStageView';
+import {
+  renderStageHudView,
+  resetStageHudStructure,
+} from './components/StageHudView';
+import {
+  renderTimelineDockView,
+  syncTimelineDockActiveView,
+  syncTimelineDockCollapseView,
+} from './components/TimelineDockView';
+import {
+  renderSurgicalAiPromptMarkup,
+  SurgicalAiScope,
+  wireSurgicalAiPromptView,
+} from './components/SurgicalAiPromptView';
+import {
+  openSlideContextMenuView,
+} from './components/SlideContextMenu';
+import {
+  openCommandPaletteModal,
+  StudioCommandItem,
+} from './modals/CommandPaletteModal';
+import { openShortcutsHelpModalView } from './modals/ShortcutsHelpModal';
 import { Icons } from './icons';
 import {
   cycleThemePreference,
   detectInitialTheme,
-  getResolvedTheme,
   getThemePreference,
   STAGE_COLOR_SWATCHES,
   ThemePreference,
@@ -137,7 +164,7 @@ export class MotionPresentationApp {
   private isGeneratingDemo = false;
   private isSavingProject = false;
   private aiEditDraftInstruction = '';
-  private aiEditScopeOverride: 'slide' | 'idle-loop' | 'transition' | 'project' | null = null;
+  private aiEditScopeOverride: SurgicalAiScope | null = null;
   private currentProjectFilePath: string | null = null;
   private presenterCursorTimer: number | null = null;
   private presenterOverlayEl: HTMLElement | null = null;
@@ -164,6 +191,14 @@ export class MotionPresentationApp {
   private commandPaletteQuery = '';
   private commandPaletteActiveIdx = 0;
   private closeContextMenuFn: (() => void) | null = null;
+  private readonly rootScope = new ComponentScope();
+  private readonly toolbarScope = this.rootScope.createChildScope();
+  private readonly emptyStageScope = this.rootScope.createChildScope();
+  private readonly stageHudScope = this.rootScope.createChildScope();
+  private readonly timelineDockScope = this.rootScope.createChildScope();
+  private readonly inspectorAiScope = this.rootScope.createChildScope();
+  private readonly contextMenuScope = this.rootScope.createChildScope();
+  private readonly modalScope = this.rootScope.createChildScope();
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -187,6 +222,15 @@ export class MotionPresentationApp {
     this.onStoreUpdated();
     void this.syncDesktopLanguageAndLocale(initialLang);
     void this.consumeInitialProjectFile();
+  }
+
+  public dispose(): void {
+    this.disposeActiveSplitSession();
+    this.activeModalClose?.();
+    this.closeSlideContextMenu();
+    this.rootScope.dispose();
+    this.previewEngine?.destroy?.();
+    this.presenterEngine?.destroy?.();
   }
 
   private async syncDesktopLanguageAndLocale(initialLang: AppLanguage): Promise<void> {
@@ -485,10 +529,8 @@ export class MotionPresentationApp {
       dropText.textContent = t('shell.dropOverlayText');
     }
 
-    const hud = this.root.querySelector('#floating-stage-hud');
-    if (hud) {
-      hud.innerHTML = '';
-    }
+    const hud = this.root.querySelector('#floating-stage-hud') as HTMLElement | null;
+    resetStageHudStructure(hud, this.stageHudScope);
 
     this.syncWindowTitle();
     this.renderWindowToolbar();
@@ -801,214 +843,80 @@ export class MotionPresentationApp {
   }
 
   private syncToolbarUndoRedoState(): void {
-    const undoBtn = this.root.querySelector('#btn-studio-undo') as HTMLButtonElement | null;
-    const redoBtn = this.root.querySelector('#btn-studio-redo') as HTMLButtonElement | null;
-    if (undoBtn) {
-      undoBtn.disabled = !(this.store.canUndo?.() ?? false);
-    }
-    if (redoBtn) {
-      redoBtn.disabled = !(this.store.canRedo?.() ?? false);
-    }
+    syncToolbarUndoRedoView(
+      this.root,
+      this.store.canUndo?.() ?? false,
+      this.store.canRedo?.() ?? false
+    );
   }
 
   /* =========================================================================
-   * 1. INTEGRATED WINDOW TOOLBAR (toolbars.md)
+   * 1. INTEGRATED WINDOW TOOLBAR (Studio Design System v3.0)
    * ========================================================================= */
   private renderWindowToolbar(): void {
-    const toolbar = this.root.querySelector('#window-toolbar') as HTMLElement;
-    if (!toolbar) return;
-
+    const toolbar = this.root.querySelector('#window-toolbar') as HTMLElement | null;
     const project = this.store.getProject();
-    const hasSlides = project.slides.length > 0;
-    const rtl = isRtlLanguage();
-    const navIcon = rtl ? Icons.sidebarRight : Icons.sidebarLeft;
-    const inspIcon = rtl ? Icons.sidebarLeft : Icons.sidebarRight;
     const themePref = getThemePreference();
-    const themeTitle = `${t('toolbar.themeToggleTitle')} (${t(`theme.${themePref}`)})`;
 
-    toolbar.innerHTML = `
-      <div class="toolbar-group-leading">
-        <button
-          class="btn btn-toolbar btn-icon-only ${this.isNavigatorVisible ? 'active-pane' : ''}"
-          id="btn-toggle-navigator"
-          title="${this.escapeHtml(t('toolbar.toggleNavTitle'))}"
-          aria-label="${this.escapeHtml(t('toolbar.toggleNavTitle'))}"
-        >
-          ${navIcon}
-        </button>
-        <div class="toolbar-divider"></div>
-        <input
-          type="text"
-          class="doc-title-input"
-          id="project-title-input"
-          value="${this.escapeHtml(project.title)}"
-          aria-label="${this.escapeHtml(t('toolbar.projectTitleAria'))}"
-          placeholder="${this.escapeHtml(t('toolbar.projectTitlePlaceholder'))}"
-        />
-      </div>
-
-      <div class="toolbar-group-center">
-        <button class="btn btn-toolbar is-compactable" id="btn-open-project" title="${this.escapeHtml(t('toolbar.openProjectTitle'))}" aria-label="${this.escapeHtml(t('toolbar.openProjectTitle'))}">
-          ${Icons.folderOpen}
-          <span class="btn-label">${t('toolbar.openProject')}</span>
-        </button>
-
-        <button class="btn btn-toolbar is-compactable-md" id="btn-batch-import" title="${this.escapeHtml(t('toolbar.importMediaTitle'))}" aria-label="${this.escapeHtml(t('toolbar.importMediaTitle'))}">
-          ${Icons.folderImport}
-          <span class="btn-label">${t('toolbar.importMedia')}</span>
-        </button>
-
-        <button class="btn btn-toolbar is-compactable-md" id="btn-reel-workflow" title="${this.escapeHtml(t('toolbar.reelWorkflowTitle'))}" aria-label="${this.escapeHtml(t('toolbar.reelWorkflowTitle'))}">
-          ${Icons.filmTransition}
-          <span class="btn-label">${t('toolbar.reelWorkflow')}</span>
-        </button>
-
-        <button class="btn btn-toolbar is-compactable" id="btn-add-slide" title="${this.escapeHtml(t('toolbar.addSlideTitle'))}" aria-label="${this.escapeHtml(t('toolbar.addSlideTitle'))}">
-          ${Icons.photoPlus}
-          <span class="btn-label">${t('toolbar.addSlide')}</span>
-        </button>
-
-        <div class="toolbar-divider"></div>
-
-        <button class="btn btn-toolbar is-compactable" id="btn-load-demo" ${this.isGeneratingDemo ? 'disabled' : ''} title="${this.escapeHtml(t('toolbar.loadDemoTitle'))}" aria-label="${this.escapeHtml(t('toolbar.loadDemoTitle'))}">
-          ${Icons.sparkles}
-          <span class="btn-label">${this.isGeneratingDemo ? t('toolbar.loadDemoBusy') : t('toolbar.loadDemo')}</span>
-        </button>
-
-        <button class="btn btn-toolbar is-compactable" id="btn-export-manifest" ${!hasSlides ? 'disabled' : ''} title="${this.escapeHtml(t('toolbar.saveProjectTitle'))}" aria-label="${this.escapeHtml(t('toolbar.saveProjectTitle'))}">
-          ${Icons.exportDoc}
-          <span class="btn-label">${t('toolbar.saveProject')}</span>
-        </button>
-
-        <div class="toolbar-divider"></div>
-
-        <button class="btn btn-toolbar btn-icon-only" id="btn-studio-undo" ${!(this.store.canUndo?.() ?? false) ? 'disabled' : ''} title="${this.escapeHtml(t('toolbar.undoTitle'))}" aria-label="${this.escapeHtml(t('toolbar.undoTitle'))}">
-          ${Icons.undo}
-        </button>
-        <button class="btn btn-toolbar btn-icon-only" id="btn-studio-redo" ${!(this.store.canRedo?.() ?? false) ? 'disabled' : ''} title="${this.escapeHtml(t('toolbar.redoTitle'))}" aria-label="${this.escapeHtml(t('toolbar.redoTitle'))}">
-          ${Icons.redo}
-        </button>
-        <button class="btn btn-toolbar btn-icon-only" id="btn-shortcuts-help" title="${this.escapeHtml(t('toolbar.shortcutsTitle'))}" aria-label="${this.escapeHtml(t('toolbar.shortcutsTitle'))}">
-          ${Icons.keyboard}
-        </button>
-      </div>
-
-      <div class="toolbar-group-trailing">
-        <button
-          class="btn btn-toolbar btn-icon-only"
-          id="btn-command-palette"
-          type="button"
-          title="${this.escapeHtml(t('toolbar.commandPaletteTitle'))}"
-          aria-label="${this.escapeHtml(t('toolbar.commandPaletteTitle'))}"
-        >
-          ${Icons.command}
-        </button>
-        <button
-          class="btn btn-toolbar btn-icon-only"
-          id="btn-theme-toggle"
-          type="button"
-          data-theme-pref="${themePref}"
-          data-theme-resolved="${getResolvedTheme()}"
-          title="${this.escapeHtml(themeTitle)}"
-          aria-label="${this.escapeHtml(themeTitle)}"
-        >
-          ${this.getThemeIcon(themePref)}
-        </button>
-        <button
-          class="btn btn-toolbar btn-lang-toggle"
-          id="btn-lang-toggle"
-          type="button"
-          title="${this.escapeHtml(t('toolbar.langToggleTitle'))}"
-          aria-label="${this.escapeHtml(t('toolbar.langToggleTitle'))}"
-        >
-          ${Icons.globe}
-          <span class="lang-toggle-code">${t('toolbar.langCurrent')}</span>
-        </button>
-        <button
-          class="btn btn-toolbar btn-icon-only ${this.isInspectorVisible ? 'active-pane' : ''}"
-          id="btn-toggle-inspector"
-          title="${this.escapeHtml(t('toolbar.toggleInspectorTitle'))}"
-          aria-label="${this.escapeHtml(t('toolbar.toggleInspectorTitle'))}"
-        >
-          ${inspIcon}
-        </button>
-        <button class="btn btn-prominent" id="btn-start-fullscreen" ${!hasSlides ? 'disabled' : ''} title="${this.escapeHtml(t('toolbar.playPresentationTitle'))}">
-          ${Icons.playFill}
-          <span>${t('toolbar.playPresentation')}</span>
-        </button>
-      </div>
-    `;
-
-    const titleInput = toolbar.querySelector('#project-title-input') as HTMLInputElement;
-    titleInput?.addEventListener('change', () => {
-      this.store.setProjectTitle(titleInput.value);
-    });
-
-    toolbar.querySelector('#btn-command-palette')?.addEventListener('click', () => {
-      this.openCommandPalette();
-    });
-
-    toolbar.querySelector('#btn-theme-toggle')?.addEventListener('click', () => {
-      this.toggleTheme();
-    });
-
-    toolbar.querySelector('#btn-lang-toggle')?.addEventListener('click', () => {
-      this.toggleLanguage();
-    });
-
-    toolbar.querySelector('#btn-toggle-navigator')?.addEventListener('click', () => {
-      this.toggleNavigatorPane();
-    });
-
-    toolbar.querySelector('#btn-toggle-inspector')?.addEventListener('click', () => {
-      this.toggleInspectorPane();
-    });
-
-    toolbar.querySelector('#btn-open-project')?.addEventListener('click', () => {
-      this.handleOpenProject();
-    });
-
-    toolbar.querySelector('#btn-load-demo')?.addEventListener('click', () => {
-      this.handleGenerateDemo();
-    });
-
-    toolbar.querySelector('#btn-batch-import')?.addEventListener('click', () => {
-      this.handleImportMedia();
-    });
-
-    toolbar.querySelector('#btn-reel-workflow')?.addEventListener('click', () => {
-      this.handleOpenReelWorkflow();
-    });
-
-    toolbar.querySelector('#btn-add-slide')?.addEventListener('click', () => {
-      const input = this.root.querySelector('#single-image-input') as HTMLInputElement;
-      input.dataset.replaceSlideId = '';
-      input.click();
-    });
-
-    toolbar.querySelector('#btn-export-manifest')?.addEventListener('click', () => {
-      void this.handleSaveProject(false);
-    });
-
-    toolbar.querySelector('#btn-studio-undo')?.addEventListener('click', () => {
-      if (this.store.undo()) {
-        this.store.notify(t('notify.undoDone'), 'info', 2000);
+    renderWindowToolbarView(
+      toolbar,
+      this.toolbarScope,
+      {
+        projectTitle: project.title,
+        hasSlides: project.slides.length > 0,
+        isNavigatorVisible: this.isNavigatorVisible,
+        isInspectorVisible: this.isInspectorVisible,
+        isGeneratingDemo: this.isGeneratingDemo,
+        canUndo: this.store.canUndo?.() ?? false,
+        canRedo: this.store.canRedo?.() ?? false,
+        themeIcon: this.getThemeIcon(themePref),
+        themePref,
+      },
+      {
+        onProjectTitleChange: (title) => this.store.setProjectTitle(title),
+        onToggleNavigator: () => this.toggleNavigatorPane(),
+        onToggleInspector: () => this.toggleInspectorPane(),
+        onOpenProject: () => {
+          void this.handleOpenProject();
+        },
+        onImportMedia: () => {
+          void this.handleImportMedia();
+        },
+        onOpenReelWorkflow: () => {
+          void this.handleOpenReelWorkflow();
+        },
+        onAddSlide: () => {
+          const input = this.root.querySelector('#single-image-input') as HTMLInputElement | null;
+          if (input) {
+            input.dataset.replaceSlideId = '';
+            input.click();
+          }
+        },
+        onGenerateDemo: () => {
+          void this.handleGenerateDemo();
+        },
+        onSaveProject: () => {
+          void this.handleSaveProject(false);
+        },
+        onUndo: () => {
+          if (this.store.undo()) {
+            this.store.notify(t('notify.undoDone'), 'info', 2000);
+          }
+        },
+        onRedo: () => {
+          if (this.store.redo()) {
+            this.store.notify(t('notify.redoDone'), 'info', 2000);
+          }
+        },
+        onOpenShortcuts: () => this.openShortcutsHelpModal(),
+        onOpenCommandPalette: () => this.openCommandPalette(),
+        onToggleTheme: () => this.toggleTheme(),
+        onToggleLanguage: () => this.toggleLanguage(),
+        onStartFullscreen: () => {
+          void this.enterFullscreenPresentation(this.latestEngineStatus?.currentSlideIndex || 0);
+        },
       }
-    });
-
-    toolbar.querySelector('#btn-studio-redo')?.addEventListener('click', () => {
-      if (this.store.redo()) {
-        this.store.notify(t('notify.redoDone'), 'info', 2000);
-      }
-    });
-
-    toolbar.querySelector('#btn-shortcuts-help')?.addEventListener('click', () => {
-      this.openShortcutsHelpModal();
-    });
-
-    toolbar.querySelector('#btn-start-fullscreen')?.addEventListener('click', () => {
-      this.enterFullscreenPresentation(this.latestEngineStatus?.currentSlideIndex || 0);
-    });
+    );
   }
 
   private toggleNavigatorPane(): void {
@@ -1927,162 +1835,51 @@ export class MotionPresentationApp {
    * 3. CENTER STAGE: EMPTY STATE & FLOATING LIQUID GLASS HUD
    * ========================================================================= */
   private renderEmptyOverlay(): void {
-    const overlay = this.root.querySelector('#empty-overlay') as HTMLElement;
-    const hud = this.root.querySelector('#floating-stage-hud') as HTMLElement;
-    if (!overlay) return;
-
-    const slides = this.store.getSlides();
-    if (slides.length > 0) {
-      overlay.style.display = 'none';
-      if (hud) hud.style.display = 'flex';
-      return;
-    }
-
-    overlay.style.display = 'flex';
-    if (hud) hud.style.display = 'none';
-
-    overlay.innerHTML = `
-      <div class="empty-sheet-card" id="empty-drop-card">
-        <div class="empty-symbol-circle">${Icons.filmTransition}</div>
-        <h2 class="empty-heading">${t('stage.emptyHeading')}</h2>
-        <p class="empty-copy">
-          ${t('stage.emptyDesc')}
-        </p>
-        <div class="empty-meta-line">PNG · JPG · WEBP · MP4 · WEBM · MOV · MPRES</div>
-        <div class="empty-actions-row">
-          <button class="btn btn-prominent" id="btn-empty-import">
-            ${Icons.folderImport}
-            <span>${t('stage.emptyPickFiles')}</span>
-          </button>
-          <button class="btn" id="btn-empty-reel">
-            ${Icons.filmTransition}
-            <span>${t('stage.emptyReelWorkflow')}</span>
-          </button>
-          <button class="btn" id="btn-empty-demo">
-            ${Icons.sparkles}
-            <span>${t('stage.emptyLoadDemo')}</span>
-          </button>
-        </div>
-      </div>
-    `;
-
-    overlay.querySelector('#btn-empty-import')?.addEventListener('click', () => {
-      this.handleImportMedia();
-    });
-
-    overlay.querySelector('#btn-empty-reel')?.addEventListener('click', () => {
-      this.handleOpenReelWorkflow();
-    });
-
-    overlay.querySelector('#btn-empty-demo')?.addEventListener('click', () => {
-      this.handleGenerateDemo();
-    });
-  }
-
-  private ensureFloatingStageHudStructure(): void {
-    const hud = this.root.querySelector('#floating-stage-hud') as HTMLElement;
-    if (!hud || hud.querySelector('#btn-hud-next')) return;
-
-    const rtl = isRtlLanguage();
-    const prevIcon = rtl ? Icons.chevronRight : Icons.chevronLeft;
-    const nextIcon = rtl ? Icons.chevronLeft : Icons.chevronRight;
-
-    hud.innerHTML = `
-      <button
-        class="hud-transport-btn"
-        id="btn-hud-prev"
-        title="${this.escapeHtml(t('hud.prevTitle'))}"
-        aria-label="${this.escapeHtml(t('hud.prevAria'))}"
-      >
-        ${prevIcon}
-      </button>
-
-      <div class="hud-status-readout">
-        <span class="hud-phase-dot" id="hud-phase-dot"></span>
-        <span class="tabular-nums" id="hud-slide-counter" style="color: var(--label-primary); font-weight: 600;">
-          01 / 01
-        </span>
-      </div>
-
-      <button
-        class="hud-step-btn"
-        id="btn-hud-next"
-        title="${this.escapeHtml(t('hud.nextTitle'))}"
-        aria-label="${this.escapeHtml(t('hud.nextAria'))}"
-      >
-        <span id="hud-next-label">${t('hud.nextLabel')}</span>
-        ${nextIcon}
-      </button>
-
-      <div class="toolbar-divider"></div>
-
-      <button
-        class="hud-transport-btn"
-        id="btn-hud-replay"
-        title="${this.escapeHtml(t('hud.replayTitle'))}"
-        aria-label="${this.escapeHtml(t('hud.replayAria'))}"
-      >
-        ${Icons.replay}
-      </button>
-    `;
-
-    hud.querySelector('#btn-hud-prev')?.addEventListener('click', () => {
-      this.previewEngine.previous();
-    });
-
-    hud.querySelector('#btn-hud-next')?.addEventListener('click', () => {
-      this.previewEngine.next();
-    });
-
-    hud.querySelector('#btn-hud-replay')?.addEventListener('click', () => {
-      this.previewEngine.previewCurrentTransition();
-    });
+    const overlay = this.root.querySelector('#empty-overlay') as HTMLElement | null;
+    const hud = this.root.querySelector('#floating-stage-hud') as HTMLElement | null;
+    renderEmptyStageView(
+      overlay,
+      hud,
+      this.emptyStageScope,
+      this.store.getSlides().length,
+      {
+        onImportMedia: () => {
+          void this.handleImportMedia();
+        },
+        onOpenReelWorkflow: () => {
+          void this.handleOpenReelWorkflow();
+        },
+        onGenerateDemo: () => {
+          void this.handleGenerateDemo();
+        },
+        onOpenProject: () => {
+          void this.handleOpenProject();
+        },
+      }
+    );
   }
 
   private renderFloatingStageHud(): void {
-    const hud = this.root.querySelector('#floating-stage-hud') as HTMLElement;
+    const hud = this.root.querySelector('#floating-stage-hud') as HTMLElement | null;
+    const slides = this.store.getSlides();
     if (!hud) return;
 
-    const slides = this.store.getSlides();
-    if (slides.length === 0) {
-      hud.style.display = 'none';
-      return;
+    const idx = renderStageHudView(
+      hud,
+      this.stageHudScope,
+      slides.length,
+      this.latestEngineStatus,
+      this.store.getSettings().loopPresentation,
+      {
+        onPrev: () => this.previewEngine.previous(),
+        onNext: () => this.previewEngine.next(),
+        onReplay: () => this.previewEngine.previewCurrentTransition(),
+      }
+    );
+
+    if (slides.length > 0) {
+      this.syncNavigatorActiveSlide(idx);
     }
-    hud.style.display = 'flex';
-
-    this.ensureFloatingStageHudStructure();
-
-    const status = this.latestEngineStatus;
-    const idx = status?.currentSlideIndex ?? 0;
-    const isTransitioning = status?.phase === 'PLAYING_TRANSITION';
-    const currentFormatted = String(idx + 1).padStart(2, '0');
-    const totalFormatted = String(slides.length).padStart(2, '0');
-
-    const counter = hud.querySelector('#hud-slide-counter');
-    if (counter && counter.textContent !== `${currentFormatted} / ${totalFormatted}`) {
-      counter.textContent = `${currentFormatted} / ${totalFormatted}`;
-    }
-
-    const dot = hud.querySelector('#hud-phase-dot');
-    dot?.classList.toggle('transitioning', isTransitioning);
-
-    const nextLabel = hud.querySelector('#hud-next-label');
-    const expectedNextText = isTransitioning ? t('hud.skipLabel') : t('hud.nextLabel');
-    if (nextLabel && nextLabel.textContent !== expectedNextText) {
-      nextLabel.textContent = expectedNextText;
-    }
-
-    const prevBtn = hud.querySelector('#btn-hud-prev') as HTMLButtonElement;
-    if (prevBtn) {
-      prevBtn.disabled = idx === 0 && !this.store.getSettings().loopPresentation;
-    }
-
-    const replayBtn = hud.querySelector('#btn-hud-replay') as HTMLButtonElement;
-    if (replayBtn) {
-      replayBtn.disabled = slides.length < 2;
-    }
-
-    this.syncNavigatorActiveSlide(idx);
   }
 
   private syncNavigatorActiveSlide(currentIdx: number): void {
@@ -2128,6 +1925,7 @@ export class MotionPresentationApp {
    * ========================================================================= */
   private renderInspectorPane(): void {
     this.disposeActiveSplitSession();
+    this.inspectorAiScope.clear();
 
     const pane = this.root.querySelector('#inspector-pane') as HTMLElement;
     if (!pane) return;
@@ -2251,7 +2049,7 @@ export class MotionPresentationApp {
 
         ${this.renderSurgicalAiPromptGroup(activeSlide, slideIdx, slides.length, 'slide')}
 
-        <div class="inspector-group" style="border-bottom: none;">
+        <div class="inspector-group">
           <button class="btn" id="btn-insp-duplicate-slide" style="width: 100%; margin-bottom: 6px;">
             ${Icons.duplicate}
             <span>${t('inspector.duplicateSlide')}</span>
@@ -2463,7 +2261,7 @@ export class MotionPresentationApp {
           </button>
         </div>
 
-        <div class="inspector-group" style="border-bottom: none;">
+        <div class="inspector-group">
           <div class="inspector-group-title">
             <span>${t('inspector.speedFallbackSection')}</span>
           </div>
@@ -2583,7 +2381,7 @@ export class MotionPresentationApp {
           </div>
         </div>
 
-        <div class="inspector-group" style="border-bottom: none;">
+        <div class="inspector-group">
           <div class="inspector-group-title">
             <span>${t('settings.displayAudioSection')}</span>
           </div>
@@ -2704,7 +2502,7 @@ export class MotionPresentationApp {
               ? `${(diag.totalMediaBytes / (1024 * 1024)).toFixed(1)} MB`
               : `${Math.round(diag.totalMediaBytes / 1024)} KB`;
           return `
-        <div class="inspector-group" style="border-bottom: none;" id="insp-deck-diagnostics">
+        <div class="inspector-group" id="insp-deck-diagnostics">
           <div class="inspector-group-title">
             <span>${t('settings.statsSection')}</span>
             <span class="tabular-nums">${durText}</span>
@@ -3211,122 +3009,16 @@ export class MotionPresentationApp {
     totalSlides: number,
     defaultScope: 'slide' | 'transition'
   ): string {
-    const aiMeta = this.store.getProjectAiSourceMeta();
-    const skillName: 'new-motion-presentation' | 'create-new' =
-      aiMeta?.skillName === 'create-new' ? 'create-new' : 'new-motion-presentation';
-    const scope = this.aiEditScopeOverride ?? defaultScope;
-    const outputDirPath = aiMeta?.outputDirPath || aiMeta?.projectRootPath || '';
-    const lang = getLanguage();
-    const currentVideoTime = this.previewEngine?.getActiveVideoTimeSec?.() ?? null;
-
-    const previewPrompt = MotionReelImporter.buildSurgicalEditPrompt({
-      skillName,
-      projectRootPath: aiMeta?.projectRootPath || outputDirPath,
-      outputDirPath,
-      scope,
-      slideIndex: slideIdx + 1,
+    return renderSurgicalAiPromptMarkup({
+      activeSlide,
+      slideIdx,
       totalSlides,
-      slideTitle: activeSlide.title,
-      hasIdleLoop: Boolean(activeSlide.idleLoopAsset || activeSlide.expectedIdleLoopFileName),
-      currentTimecodeSec: currentVideoTime,
-      sourceMeta: activeSlide.sourceMeta,
-      userInstruction: this.aiEditDraftInstruction,
-      language: lang,
+      defaultScope,
+      scopeOverride: this.aiEditScopeOverride,
+      draftInstruction: this.aiEditDraftInstruction,
+      aiMeta: this.store.getProjectAiSourceMeta(),
+      currentVideoTimeSec: this.previewEngine?.getActiveVideoTimeSec?.() ?? null,
     });
-
-    const chipLoopVal =
-      lang === 'ar'
-        ? 'أضف حركة خمول دائرية ناعمة (Idle Loop) تلتزم بنقطة الراحة مع بقاء النصوص ثابتة.'
-        : 'Add a subtle Rest-Pose Idle Loop animation keeping core typography rock-steady.';
-    const chipFasterVal =
-      lang === 'ar'
-        ? 'اجعل التوقيت أسرع وأكثر حيوية (Snappier spring easing).'
-        : 'Make the motion timing snappier with crisp spring easing.';
-    const chipZoomVal =
-      lang === 'ar'
-        ? 'نفّذ انتقال كاميرا سلس (Camera Zoom Morph) نحو العنصر الرئيسي.'
-        : 'Use a smooth log-space camera zoom morph into the hero element.';
-    const chipColorsVal =
-      lang === 'ar'
-        ? 'حسّن تباين الألوان ووضوح العناوين.'
-        : 'Boost color contrast and headline legibility.';
-    const chipAltVal =
-      lang === 'ar'
-        ? 'ابتكر تصميماً وحركة بديلة أكثر إبداعاً لنفس المحتوى.'
-        : 'Propose and render a fresh, higher-creativity visual alternative for this same content.';
-
-    return `
-      <div class="inspector-group" id="insp-ai-prompt-group">
-        <div class="inspector-group-title">
-          <span>${t('inspector.aiEditTitle')}</span>
-          ${Icons.wand}
-        </div>
-
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
-          <div class="prop-row" style="margin-bottom: 6px;">
-            <label class="prop-label" for="insp-ai-scope">${t('inspector.aiScopeLabel')}</label>
-            <select class="select-field" id="insp-ai-scope">
-              <option value="slide" ${scope === 'slide' ? 'selected' : ''}>${t('inspector.aiScopeSlide')}</option>
-              <option value="idle-loop" ${scope === 'idle-loop' ? 'selected' : ''}>${t('inspector.aiScopeLoop')}</option>
-              <option value="transition" ${scope === 'transition' ? 'selected' : ''}>${t('inspector.aiScopeTransition')}</option>
-              <option value="project" ${scope === 'project' ? 'selected' : ''}>${t('inspector.aiScopeProject')}</option>
-            </select>
-          </div>
-          <div class="prop-row" style="margin-bottom: 6px;">
-            <label class="prop-label" for="insp-ai-skill">${t('inspector.aiSkillLabel')}</label>
-            <select class="select-field" id="insp-ai-skill">
-              <option value="new-motion-presentation" ${skillName === 'new-motion-presentation' ? 'selected' : ''}>/new-motion-presentation</option>
-              <option value="create-new" ${skillName === 'create-new' ? 'selected' : ''}>/create-new</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="prop-row">
-          <label class="prop-label" for="insp-ai-path">${t('inspector.aiPathLabel')}</label>
-          <input
-            type="text"
-            class="input-field"
-            id="insp-ai-path"
-            dir="ltr"
-            placeholder="${this.escapeHtml(t('inspector.aiPathPlaceholder'))}"
-            value="${this.escapeHtml(outputDirPath)}"
-          />
-        </div>
-
-        <div class="prop-row">
-          <label class="prop-label" for="insp-ai-custom-input">${t('inspector.aiInstructionLabel')}</label>
-          <div style="display:flex; flex-wrap:wrap; gap:4px; margin-bottom:6px;">
-            <button type="button" class="btn btn-xs ai-quick-chip" data-chip-text="${this.escapeHtml(chipLoopVal)}">${Icons.replay}<span>${t('inspector.chipLoop')}</span></button>
-            <button type="button" class="btn btn-xs ai-quick-chip" data-chip-text="${this.escapeHtml(chipFasterVal)}">${Icons.bolt}<span>${t('inspector.chipFaster')}</span></button>
-            <button type="button" class="btn btn-xs ai-quick-chip" data-chip-text="${this.escapeHtml(chipZoomVal)}">${Icons.maximize}<span>${t('inspector.chipZoom')}</span></button>
-            <button type="button" class="btn btn-xs ai-quick-chip" data-chip-text="${this.escapeHtml(chipColorsVal)}">${Icons.palette}<span>${t('inspector.chipColors')}</span></button>
-            <button type="button" class="btn btn-xs ai-quick-chip" data-chip-text="${this.escapeHtml(chipAltVal)}">${Icons.sparkles}<span>${t('inspector.chipAlt')}</span></button>
-          </div>
-          <textarea
-            class="textarea-field"
-            id="insp-ai-custom-input"
-            rows="3"
-            placeholder="${this.escapeHtml(t('inspector.aiInstructionPlaceholder'))}"
-          >${this.escapeHtml(this.aiEditDraftInstruction)}</textarea>
-        </div>
-
-        <div class="prop-row" style="margin-bottom: 6px;">
-          <label class="prop-label" for="insp-ai-prompt-output">${t('inspector.aiPreviewLabel')}</label>
-          <textarea
-            class="textarea-field"
-            id="insp-ai-prompt-output"
-            rows="5"
-            readonly
-            style="font-family: var(--font-mono, monospace); font-size: 11px; opacity: 0.92;"
-          >${this.escapeHtml(previewPrompt)}</textarea>
-        </div>
-
-        <button class="btn btn-primary" id="btn-copy-ai-prompt" type="button" style="width: 100%;">
-          ${Icons.duplicate}
-          <span>${t('inspector.aiCopyBtn')}</span>
-        </button>
-      </div>
-    `;
   }
 
   private wireSurgicalAiPromptEvents(
@@ -3335,89 +3027,25 @@ export class MotionPresentationApp {
     slideIdx: number,
     totalSlides: number
   ): void {
-    const scopeSel = pane.querySelector('#insp-ai-scope') as HTMLSelectElement | null;
-    const skillSel = pane.querySelector('#insp-ai-skill') as HTMLSelectElement | null;
-    const pathIn = pane.querySelector('#insp-ai-path') as HTMLInputElement | null;
-    const customIn = pane.querySelector('#insp-ai-custom-input') as HTMLTextAreaElement | null;
-    const outputPreview = pane.querySelector('#insp-ai-prompt-output') as HTMLTextAreaElement | null;
-    const copyBtn = pane.querySelector('#btn-copy-ai-prompt') as HTMLButtonElement | null;
-
-    const refreshPreview = () => {
-      if (!outputPreview) return;
-      const scope = (scopeSel?.value || 'slide') as
-        | 'slide'
-        | 'idle-loop'
-        | 'transition'
-        | 'project';
-      const skillName = (skillSel?.value || 'new-motion-presentation') as
-        | 'new-motion-presentation'
-        | 'create-new';
-      const pathVal = pathIn?.value ?? '';
-      const aiMeta = this.store.getProjectAiSourceMeta();
-      this.aiEditScopeOverride = scope;
-      this.aiEditDraftInstruction = customIn?.value ?? '';
-
-      outputPreview.value = MotionReelImporter.buildSurgicalEditPrompt({
-        skillName,
-        projectRootPath: aiMeta?.projectRootPath || pathVal,
-        outputDirPath: pathVal,
-        scope,
-        slideIndex: Math.max(1, slideIdx + 1),
-        totalSlides,
-        slideTitle: activeSlide.title,
-        hasIdleLoop: Boolean(activeSlide.idleLoopAsset || activeSlide.expectedIdleLoopFileName),
-        currentTimecodeSec: this.previewEngine?.getActiveVideoTimeSec?.() ?? null,
-        sourceMeta: activeSlide.sourceMeta,
-        userInstruction: this.aiEditDraftInstruction,
-        language: getLanguage(),
-      });
-    };
-
-    scopeSel?.addEventListener('change', refreshPreview);
-    skillSel?.addEventListener('change', () => {
-      const curr = this.store.getProjectAiSourceMeta() || {};
-      this.store.setProjectAiSourceMeta({
-        ...curr,
-        skillName: skillSel.value as 'new-motion-presentation' | 'create-new',
-      });
-      refreshPreview();
-    });
-    pathIn?.addEventListener('input', refreshPreview);
-    pathIn?.addEventListener('change', () => {
-      const curr = this.store.getProjectAiSourceMeta() || {};
-      this.store.setProjectAiSourceMeta({
-        ...curr,
-        outputDirPath: pathIn.value.trim(),
-        projectRootPath: curr.projectRootPath || pathIn.value.trim(),
-      });
-      refreshPreview();
-    });
-    customIn?.addEventListener('input', refreshPreview);
-
-    pane.querySelectorAll('.ai-quick-chip').forEach((chip) => {
-      chip.addEventListener('click', () => {
-        const snippet = (chip as HTMLElement).dataset.chipText || '';
-        if (!snippet || !customIn) return;
-        const current = customIn.value.trim();
-        customIn.value = current ? `${current}\n- ${snippet}` : snippet;
-        refreshPreview();
-        customIn.focus();
-      });
-    });
-
-    copyBtn?.addEventListener('click', async () => {
-      refreshPreview();
-      const text = outputPreview?.value || '';
-      if (!text) return;
-      try {
-        await navigator.clipboard?.writeText(text);
-        this.store.notify(t('notify.aiPromptCopied'), 'success', 2500);
-      } catch {
-        outputPreview?.select();
-        document.execCommand?.('copy');
-        this.store.notify(t('notify.aiPromptCopied'), 'success', 2500);
+    wireSurgicalAiPromptView(
+      pane,
+      this.inspectorAiScope,
+      activeSlide,
+      slideIdx,
+      totalSlides,
+      {
+        getAiMeta: () => this.store.getProjectAiSourceMeta(),
+        setAiMeta: (meta) => this.store.setProjectAiSourceMeta(meta),
+        getCurrentVideoTimeSec: () => this.previewEngine?.getActiveVideoTimeSec?.() ?? null,
+        onDraftChange: (draft, scope) => {
+          this.aiEditDraftInstruction = draft;
+          this.aiEditScopeOverride = scope;
+        },
+        onNotifyCopied: () => {
+          this.store.notify(t('notify.aiPromptCopied'), 'success', 2500);
+        },
       }
-    });
+    );
   }
 
   private renderToast(): void {
@@ -7249,17 +6877,7 @@ export class MotionPresentationApp {
 
   private renderStudioTimelineDock(): void {
     const dock = this.root.querySelector('#studio-timeline-dock') as HTMLElement | null;
-    if (!dock) return;
-
     const slides = this.store.getSlides();
-    if (slides.length === 0) {
-      dock.classList.add('hidden');
-      dock.innerHTML = '';
-      return;
-    }
-
-    dock.classList.remove('hidden');
-    dock.classList.toggle('is-collapsed', this.isTimelineDockCollapsed);
 
     let totalTransitionSec = 0;
     for (let i = 0; i < slides.length - 1; i++) {
@@ -7272,7 +6890,10 @@ export class MotionPresentationApp {
         ) {
           totalTransitionSec += spec.endTimeSec - spec.startTimeSec;
         } else {
-          totalTransitionSec += spec.videoAsset.durationSec > 0 ? spec.videoAsset.durationSec : (spec.fallbackDurationMs || 650) / 1000;
+          totalTransitionSec +=
+            spec.videoAsset.durationSec > 0
+              ? spec.videoAsset.durationSec
+              : (spec.fallbackDurationMs || 650) / 1000;
         }
       } else {
         totalTransitionSec += (spec.fallbackDurationMs || 650) / 1000;
@@ -7283,140 +6904,60 @@ export class MotionPresentationApp {
     const activeSlideId =
       selection.type === 'slide' || selection.type === 'transition'
         ? selection.slideId
-        : slides[this.latestEngineStatus?.currentSlideIndex ?? this.store.getActivePreviewIndex()]?.id;
-    const rtl = isRtlLanguage();
-    const bridgeArrow = rtl ? Icons.arrowLeft : Icons.arrowRight;
+        : slides[this.latestEngineStatus?.currentSlideIndex ?? this.store.getActivePreviewIndex()]
+            ?.id;
 
-    const nodesHtml = slides
-      .map((slide, idx) => {
-        const isSlideActive = slide.id === activeSlideId && selection.type !== 'transition';
-        const thumbHtml = slide.imageAsset.objectUrl
-          ? `<img src="${this.escapeHtml(slide.imageAsset.objectUrl)}" alt="" />`
-          : `<span class="tabular-nums">${idx + 1}</span>`;
-        const slideBtn = `
-          <button
-            type="button"
-            class="dock-seq-node ${isSlideActive ? 'active' : ''}"
-            data-dock-slide-id="${slide.id}"
-            title="${this.escapeHtml(slide.title)}"
-          >
-            <span class="dock-seq-thumb">${thumbHtml}</span>
-            <span class="dock-seq-label tabular-nums">${String(idx + 1).padStart(2, '0')} · ${this.escapeHtml(slide.title)}</span>
-          </button>
-        `;
-
-        if (idx >= slides.length - 1) return slideBtn;
-
-        const hasVideo = Boolean(slide.transitionToNext.videoAsset);
-        const isTransActive = selection.type === 'transition' && selection.slideId === slide.id;
-        const bridgeTitle = hasVideo
-          ? slide.transitionToNext.videoAsset?.name || t('ctx.editTransition')
-          : t('inspector.fallbackStyleLabel');
-
-        return `${slideBtn}
-          <button
-            type="button"
-            class="dock-seq-bridge ${hasVideo ? 'has-video' : ''} ${isTransActive ? 'active' : ''}"
-            data-dock-trans-slide-id="${slide.id}"
-            title="${this.escapeHtml(bridgeTitle)}"
-            aria-label="${this.escapeHtml(bridgeTitle)}"
-          >${hasVideo ? Icons.filmTransition : bridgeArrow}</button>`;
-      })
-      .join('');
-
-    dock.innerHTML = `
-      <div class="dock-header">
-        <div class="dock-header-lead">
-          <span class="dock-title">${Icons.timelineDock} <span>${this.escapeHtml(t('dock.title'))}</span></span>
-          <span class="dock-stat-pill tabular-nums">${slides.length} ${this.escapeHtml(t('dock.slidesCount'))}</span>
-          <span class="dock-stat-pill tabular-nums">${this.escapeHtml(t('dock.totalDuration'))}: ${this.escapeHtml(this.formatTimecode(totalTransitionSec))}</span>
-        </div>
-        <div class="dock-header-trailing">
-          <button type="button" class="btn dock-cues-btn" id="btn-stage-open-cues" title="${this.escapeHtml(t('dock.openCuesBtn'))}">
-            ${Icons.splitCue}
-            <span>${this.escapeHtml(t('dock.openCuesBtn'))}</span>
-          </button>
-          <button
-            type="button"
-            class="btn btn-icon-only"
-            id="btn-toggle-timeline-dock"
-            aria-expanded="${!this.isTimelineDockCollapsed}"
-            title="${this.escapeHtml(t('dock.toggleTitle'))}"
-            aria-label="${this.escapeHtml(t('dock.toggleTitle'))}"
-          >
-            ${this.isTimelineDockCollapsed ? Icons.chevronUp : Icons.chevronDown}
-          </button>
-        </div>
-      </div>
-      <div class="dock-body">
-        <div class="dock-sequence-track">${nodesHtml}</div>
-      </div>
-    `;
-
-    dock.querySelector('#btn-stage-open-cues')?.addEventListener('click', () => {
-      this.openReelStudioForSelection();
-    });
-
-    dock.querySelector('#btn-toggle-timeline-dock')?.addEventListener('click', () => {
-      this.toggleTimelineDock();
-    });
-
-    dock.querySelectorAll('.dock-seq-node').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const slideId = (btn as HTMLElement).dataset.dockSlideId;
-        if (slideId) {
-          this.store.setSelection({ type: 'slide', slideId });
-        }
-      });
-    });
-
-    dock.querySelectorAll('.dock-seq-bridge').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const slideId = (btn as HTMLElement).dataset.dockTransSlideId;
-        if (slideId) {
-          this.store.setSelection({ type: 'transition', slideId });
-        }
-      });
-    });
+    renderTimelineDockView(
+      dock,
+      this.timelineDockScope,
+      {
+        slides,
+        activeSlideId,
+        isTransitionSelected: selection.type === 'transition',
+        selectedTransitionSlideId:
+          selection.type === 'transition' ? selection.slideId : undefined,
+        isCollapsed: this.isTimelineDockCollapsed,
+        formattedTotalDuration: this.formatTimecode(totalTransitionSec),
+      },
+      {
+        onOpenCues: () => this.openReelStudioForSelection(),
+        onToggleCollapse: () => this.toggleTimelineDock(),
+        onSelectSlide: (slideId) => this.store.setSelection({ type: 'slide', slideId }),
+        onSelectTransition: (slideId) =>
+          this.store.setSelection({ type: 'transition', slideId }),
+      }
+    );
   }
 
   private syncTimelineDockActiveState(): void {
-    const dock = this.root.querySelector('#studio-timeline-dock');
-    if (!dock || dock.classList.contains('hidden')) return;
-
+    const dock = this.root.querySelector('#studio-timeline-dock') as HTMLElement | null;
     const slides = this.store.getSlides();
     const selection = this.store.getSelection();
     const activeSlideId =
       selection.type === 'slide' || selection.type === 'transition'
         ? selection.slideId
-        : slides[this.latestEngineStatus?.currentSlideIndex ?? this.store.getActivePreviewIndex()]?.id;
+        : slides[this.latestEngineStatus?.currentSlideIndex ?? this.store.getActivePreviewIndex()]
+            ?.id;
 
-    dock.querySelectorAll('.dock-seq-node').forEach((node) => {
-      const id = (node as HTMLElement).dataset.dockSlideId;
-      node.classList.toggle('active', Boolean(id && id === activeSlideId && selection.type !== 'transition'));
-    });
-    dock.querySelectorAll('.dock-seq-bridge').forEach((bridge) => {
-      const id = (bridge as HTMLElement).dataset.dockTransSlideId;
-      bridge.classList.toggle('active', Boolean(id && selection.type === 'transition' && id === selection.slideId));
-    });
+    syncTimelineDockActiveView(
+      dock,
+      activeSlideId,
+      selection.type === 'transition',
+      selection.type === 'transition' ? selection.slideId : undefined
+    );
   }
 
   private toggleTimelineDock(forceCollapsed?: boolean): void {
     this.isTimelineDockCollapsed =
       typeof forceCollapsed === 'boolean' ? forceCollapsed : !this.isTimelineDockCollapsed;
     const dock = this.root.querySelector('#studio-timeline-dock') as HTMLElement | null;
-    if (!dock) return;
-    dock.classList.toggle('is-collapsed', this.isTimelineDockCollapsed);
-    const toggleBtn = dock.querySelector('#btn-toggle-timeline-dock');
-    if (toggleBtn) {
-      toggleBtn.setAttribute('aria-expanded', String(!this.isTimelineDockCollapsed));
-      toggleBtn.innerHTML = this.isTimelineDockCollapsed ? Icons.chevronUp : Icons.chevronDown;
-    }
+    syncTimelineDockCollapseView(dock, this.isTimelineDockCollapsed);
   }
 
   private closeSlideContextMenu(): void {
     this.closeContextMenuFn?.();
     this.closeContextMenuFn = null;
+    this.contextMenuScope.clear();
   }
 
   private openSlideContextMenu(slideId: string, clientX: number, clientY: number): void {
@@ -7429,124 +6970,52 @@ export class MotionPresentationApp {
 
     this.closeSlideContextMenu();
 
-    const vw = typeof window !== 'undefined' && Number.isFinite(window.innerWidth) && window.innerWidth > 0 ? window.innerWidth : 1280;
-    const vh = typeof window !== 'undefined' && Number.isFinite(window.innerHeight) && window.innerHeight > 0 ? window.innerHeight : 800;
-    const left = Math.max(8, Math.min(clientX, vw - 228));
-    const top = Math.max(8, Math.min(clientY, vh - 290));
+    const closeMenu = openSlideContextMenuView(
+      {
+        host,
+        scope: this.contextMenuScope,
+        slideId,
+        slideIndex: idx,
+        totalSlides: slides.length,
+        hasReelContext: Boolean(this.store.getReelContextForSlide?.(slideId)),
+        clientX,
+        clientY,
+      },
+      {
+        onMoveUp: (id) => this.store.moveSlide(id, 'up'),
+        onMoveDown: (id) => this.store.moveSlide(id, 'down'),
+        onDuplicate: (id) => {
+          if (this.store.duplicateSlide(id)) {
+            this.store.notify(t('notify.slideDuplicated'), 'success', 2000);
+          }
+        },
+        onEditTransition: (id) => {
+          this.store.setSelection({ type: 'transition', slideId: id });
+          if (!this.isInspectorVisible) {
+            this.toggleInspectorPane();
+          }
+        },
+        onReplaceImage: (id) => {
+          const input = this.root.querySelector('#single-image-input') as HTMLInputElement | null;
+          if (input) {
+            input.dataset.replaceSlideId = id;
+            input.click();
+          }
+        },
+        onOpenCues: (id) => this.openReelStudioForSelection(id),
+        onDelete: (id) => this.promptDeleteSlide(id),
+      }
+    );
 
-    const canMoveUp = idx > 0;
-    const canMoveDown = idx < slides.length - 1;
-    const hasReelCtx = Boolean(this.store.getReelContextForSlide?.(slideId));
-
-    host.innerHTML = `
-      <div class="studio-context-menu" id="studio-context-menu" role="menu" style="left:${left}px;top:${top}px;">
-        <button type="button" class="ctx-menu-item" id="ctx-move-up" role="menuitem" ${!canMoveUp ? 'disabled' : ''}>
-          ${Icons.chevronUp}
-          <span>${this.escapeHtml(t('ctx.moveUp'))}</span>
-        </button>
-        <button type="button" class="ctx-menu-item" id="ctx-move-down" role="menuitem" ${!canMoveDown ? 'disabled' : ''}>
-          ${Icons.chevronDown}
-          <span>${this.escapeHtml(t('ctx.moveDown'))}</span>
-        </button>
-        <button type="button" class="ctx-menu-item" id="ctx-duplicate" role="menuitem">
-          ${Icons.duplicate}
-          <span>${this.escapeHtml(t('ctx.duplicate'))}</span>
-        </button>
-        <div class="ctx-menu-sep" role="separator"></div>
-        <button type="button" class="ctx-menu-item" id="ctx-edit-transition" role="menuitem" ${!canMoveDown ? 'disabled' : ''}>
-          ${Icons.sliders}
-          <span>${this.escapeHtml(t('ctx.editTransition'))}</span>
-        </button>
-        <button type="button" class="ctx-menu-item" id="ctx-replace-image" role="menuitem">
-          ${Icons.photoPlus}
-          <span>${this.escapeHtml(t('ctx.replaceImage'))}</span>
-        </button>
-        <button type="button" class="ctx-menu-item" id="ctx-open-cues" role="menuitem" ${!hasReelCtx ? 'disabled' : ''}>
-          ${Icons.splitCue}
-          <span>${this.escapeHtml(t('ctx.openCueStudio'))}</span>
-        </button>
-        <div class="ctx-menu-sep" role="separator"></div>
-        <button type="button" class="ctx-menu-item danger" id="ctx-delete-slide" role="menuitem">
-          ${Icons.trash}
-          <span>${this.escapeHtml(t('ctx.delete'))}</span>
-        </button>
-      </div>
-    `;
-
-    const cleanup = () => {
-      document.removeEventListener('click', onDocClick);
-      window.removeEventListener('keydown', onKeyDown);
-      host.innerHTML = '';
-      if (this.closeContextMenuFn === cleanup) {
+    this.closeContextMenuFn = () => {
+      if (this.closeContextMenuFn) {
         this.closeContextMenuFn = null;
       }
+      closeMenu();
     };
-
-    const onDocClick = (e: Event) => {
-      const targetEl = e.target as HTMLElement | null;
-      if (!targetEl || !targetEl.closest?.('#studio-context-menu')) {
-        cleanup();
-      }
-    };
-
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        cleanup();
-      }
-    };
-
-    this.closeContextMenuFn = cleanup;
-    document.addEventListener('click', onDocClick);
-    window.addEventListener('keydown', onKeyDown);
-
-    host.querySelector('#ctx-move-up')?.addEventListener('click', () => {
-      cleanup();
-      this.store.moveSlide(slideId, 'up');
-    });
-    host.querySelector('#ctx-move-down')?.addEventListener('click', () => {
-      cleanup();
-      this.store.moveSlide(slideId, 'down');
-    });
-    host.querySelector('#ctx-duplicate')?.addEventListener('click', () => {
-      cleanup();
-      if (this.store.duplicateSlide(slideId)) {
-        this.store.notify(t('notify.slideDuplicated'), 'success', 2000);
-      }
-    });
-    host.querySelector('#ctx-edit-transition')?.addEventListener('click', () => {
-      cleanup();
-      this.store.setSelection({ type: 'transition', slideId });
-      if (!this.isInspectorVisible) {
-        this.toggleInspectorPane();
-      }
-    });
-    host.querySelector('#ctx-replace-image')?.addEventListener('click', () => {
-      cleanup();
-      const input = this.root.querySelector('#single-image-input') as HTMLInputElement | null;
-      if (input) {
-        input.dataset.replaceSlideId = slideId;
-        input.click();
-      }
-    });
-    host.querySelector('#ctx-open-cues')?.addEventListener('click', () => {
-      cleanup();
-      this.openReelStudioForSelection(slideId);
-    });
-    host.querySelector('#ctx-delete-slide')?.addEventListener('click', () => {
-      cleanup();
-      this.promptDeleteSlide(slideId);
-    });
   }
 
-  private getStudioCommandItems(): Array<{
-    id: string;
-    group: string;
-    label: string;
-    shortcut?: string;
-    icon: string;
-    disabled?: boolean;
-    run: () => void;
-  }> {
+  private getStudioCommandItems(): StudioCommandItem[] {
     const slides = this.store.getSlides();
     const hasSlides = slides.length > 0;
     const selection = this.store.getSelection();
@@ -7696,7 +7165,8 @@ export class MotionPresentationApp {
         shortcut: 'F5',
         icon: Icons.playFill,
         disabled: !hasSlides,
-        run: () => this.enterFullscreenPresentation(this.latestEngineStatus?.currentSlideIndex || 0),
+        run: () =>
+          this.enterFullscreenPresentation(this.latestEngineStatus?.currentSlideIndex || 0),
       },
     ];
   }
@@ -7713,155 +7183,29 @@ export class MotionPresentationApp {
     }
 
     this.activeModalClose?.();
-    const prevFocused = document.activeElement as HTMLElement | null;
     if (!preserveQuery) {
       this.commandPaletteQuery = '';
       this.commandPaletteActiveIdx = 0;
     }
 
-    const allItems = this.getStudioCommandItems();
-    let isClosed = false;
-
-    const getFilteredItems = () => {
-      const q = this.commandPaletteQuery.trim().toLowerCase();
-      if (!q) return allItems;
-      return allItems.filter(
-        (item) =>
-          item.label.toLowerCase().includes(q) ||
-          item.group.toLowerCase().includes(q) ||
-          (item.shortcut && item.shortcut.toLowerCase().includes(q))
-      );
-    };
-
-    const cleanup = () => {
-      if (isClosed) return;
-      isClosed = true;
-      this.isModalOpen = false;
-      this.isCommandPaletteOpen = false;
-      this.activeModalClose = null;
-      window.removeEventListener('keydown', onKeyDown);
-      host.innerHTML = '';
-      if (prevFocused && prevFocused.isConnected) {
-        prevFocused.focus();
-      }
-    };
-
-    const renderList = () => {
-      const listEl = host.querySelector('#command-palette-list') as HTMLElement | null;
-      if (!listEl) return;
-      const filtered = getFilteredItems();
-      if (filtered.length === 0) {
-        listEl.innerHTML = `<div class="command-empty">${this.escapeHtml(t('cmd.empty'))}</div>`;
-        return;
-      }
-      if (this.commandPaletteActiveIdx >= filtered.length) {
-        this.commandPaletteActiveIdx = 0;
-      }
-
-      let currentGroup = '';
-      const chunks: string[] = [];
-      filtered.forEach((item, idx) => {
-        if (item.group !== currentGroup) {
-          currentGroup = item.group;
-          chunks.push(`<div class="command-group-label">${this.escapeHtml(currentGroup)}</div>`);
-        }
-        chunks.push(`
-          <button
-            type="button"
-            class="command-item-btn ${idx === this.commandPaletteActiveIdx ? 'active' : ''}"
-            data-cmd-id="${item.id}"
-            data-cmd-index="${idx}"
-            ${item.disabled ? 'disabled' : ''}
-          >
-            <span class="command-item-lead">
-              ${item.icon}
-              <span>${this.escapeHtml(item.label)}</span>
-            </span>
-            ${item.shortcut ? `<kbd class="kbd-badge">${this.escapeHtml(item.shortcut)}</kbd>` : ''}
-          </button>
-        `);
-      });
-      listEl.innerHTML = chunks.join('');
-
-      listEl.querySelectorAll('.command-item-btn').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const cmdId = (btn as HTMLElement).dataset.cmdId;
-          const cmd = allItems.find((item) => item.id === cmdId);
-          if (!cmd || cmd.disabled) return;
-          cleanup();
-          cmd.run();
-        });
-      });
-    };
-
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' || ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K'))) {
-        e.preventDefault();
-        cleanup();
-        return;
-      }
-      const filtered = getFilteredItems();
-      if (filtered.length === 0) return;
-
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        this.commandPaletteActiveIdx = (this.commandPaletteActiveIdx + 1) % filtered.length;
-        renderList();
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        this.commandPaletteActiveIdx = (this.commandPaletteActiveIdx - 1 + filtered.length) % filtered.length;
-        renderList();
-      } else if (e.key === 'Enter') {
-        e.preventDefault();
-        const chosen = filtered[this.commandPaletteActiveIdx];
-        if (chosen && !chosen.disabled) {
-          cleanup();
-          chosen.run();
-        }
-      }
-    };
-
     this.isModalOpen = true;
     this.isCommandPaletteOpen = true;
-    this.activeModalClose = cleanup;
-    window.addEventListener('keydown', onKeyDown);
-
-    host.innerHTML = `
-      <div class="command-palette-backdrop" id="command-palette-backdrop">
-        <div class="command-palette-modal" role="dialog" aria-modal="true" aria-label="${this.escapeHtml(t('toolbar.commandPaletteTitle'))}">
-          <div class="command-palette-search">
-            ${Icons.search}
-            <input
-              type="text"
-              class="command-palette-input"
-              id="command-palette-input"
-              value="${this.escapeHtml(this.commandPaletteQuery)}"
-              placeholder="${this.escapeHtml(t('cmd.placeholder'))}"
-              autocomplete="off"
-            />
-            <kbd class="kbd-badge">Esc</kbd>
-          </div>
-          <div class="command-palette-list" id="command-palette-list"></div>
-        </div>
-      </div>
-    `;
-
-    renderList();
-
-    const searchInput = host.querySelector('#command-palette-input') as HTMLInputElement | null;
-    searchInput?.addEventListener('input', () => {
-      this.commandPaletteQuery = searchInput.value;
-      this.commandPaletteActiveIdx = 0;
-      renderList();
+    this.activeModalClose = openCommandPaletteModal({
+      host,
+      scope: this.modalScope,
+      items: this.getStudioCommandItems(),
+      initialQuery: this.commandPaletteQuery,
+      initialActiveIdx: this.commandPaletteActiveIdx,
+      onStateChange: (query, activeIdx) => {
+        this.commandPaletteQuery = query;
+        this.commandPaletteActiveIdx = activeIdx;
+      },
+      onBeforeClose: () => {
+        this.isModalOpen = false;
+        this.isCommandPaletteOpen = false;
+        this.activeModalClose = null;
+      },
     });
-
-    host.querySelector('#command-palette-backdrop')?.addEventListener('click', (e) => {
-      if ((e.target as HTMLElement).id === 'command-palette-backdrop') {
-        cleanup();
-      }
-    });
-
-    searchInput?.focus();
   }
 
   public openShortcutsHelpModal(): void {
@@ -7870,82 +7214,11 @@ export class MotionPresentationApp {
       this.root.querySelector('#choice-modal-host')) as HTMLElement | null;
     if (!host) return;
 
-    const prevFocused = document.activeElement as HTMLElement | null;
-    let isClosed = false;
-
-    const cleanup = () => {
-      if (isClosed) return;
-      isClosed = true;
+    this.isModalOpen = true;
+    this.activeModalClose = openShortcutsHelpModalView(host, this.modalScope, () => {
       this.isModalOpen = false;
       this.activeModalClose = null;
-      window.removeEventListener('keydown', onKeyDown);
-      host.innerHTML = '';
-      if (prevFocused && prevFocused.isConnected) {
-        prevFocused.focus();
-      }
-    };
-
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' || e.key === '?' || e.key === 'F1') {
-        e.preventDefault();
-        cleanup();
-      }
-    };
-
-    this.isModalOpen = true;
-    this.activeModalClose = cleanup;
-    window.addEventListener('keydown', onKeyDown);
-
-    host.innerHTML = `
-      <div class="reel-cue-modal-backdrop" id="shortcuts-modal-backdrop">
-        <div class="choice-modal shortcuts-modal" role="dialog" aria-modal="true" aria-label="${this.escapeHtml(t('shortcuts.modalAria'))}">
-          <div class="reel-cue-modal-header">
-            <div class="reel-modal-header-lead">
-              ${Icons.keyboard}
-              <span class="reel-modal-title">${t('shortcuts.title')}</span>
-            </div>
-            <button class="icon-btn" id="btn-shortcuts-close" aria-label="${this.escapeHtml(t('presenter.close'))}">${Icons.close}</button>
-          </div>
-          <div class="choice-modal-body shortcuts-grid">
-            <div class="shortcuts-section">
-              <div class="shortcuts-section-title">${t('shortcuts.studioSection')}</div>
-              <div class="shortcut-row"><span>${t('shortcuts.undo')}</span><kbd class="kbd-badge">Ctrl + Z</kbd></div>
-              <div class="shortcut-row"><span>${t('shortcuts.redo')}</span><kbd class="kbd-badge">Ctrl + Y</kbd></div>
-              <div class="shortcut-row"><span>${t('shortcuts.duplicate')}</span><kbd class="kbd-badge">Ctrl + D</kbd></div>
-              <div class="shortcut-row"><span>${t('shortcuts.delete')}</span><kbd class="kbd-badge">Delete</kbd></div>
-              <div class="shortcut-row"><span>${t('shortcuts.selectAll')}</span><kbd class="kbd-badge">Ctrl + A</kbd></div>
-              <div class="shortcut-row"><span>${t('shortcuts.saveOpen')}</span><kbd class="kbd-badge">Ctrl + S / O</kbd></div>
-              <div class="shortcut-row"><span>${t('shortcuts.startPresenter')}</span><kbd class="kbd-badge">F5</kbd></div>
-            </div>
-            <div class="shortcuts-section">
-              <div class="shortcuts-section-title">${t('shortcuts.presenterSection')}</div>
-              <div class="shortcut-row"><span>${t('shortcuts.next')}</span><kbd class="kbd-badge">Space / → / Enter / N</kbd></div>
-              <div class="shortcut-row"><span>${t('shortcuts.prev')}</span><kbd class="kbd-badge">← / Backspace / P</kbd></div>
-              <div class="shortcut-row"><span>${t('shortcuts.notes')}</span><kbd class="kbd-badge">S</kbd></div>
-              <div class="shortcut-row"><span>${t('shortcuts.resetTimer')}</span><kbd class="kbd-badge">T</kbd></div>
-              <div class="shortcut-row"><span>${t('shortcuts.grid')}</span><kbd class="kbd-badge">G</kbd></div>
-              <div class="shortcut-row"><span>${t('shortcuts.blackWhite')}</span><kbd class="kbd-badge">B / W</kbd></div>
-              <div class="shortcut-row"><span>${t('shortcuts.laser')}</span><kbd class="kbd-badge">Ctrl + L</kbd></div>
-              <div class="shortcut-row"><span>${t('shortcuts.jumpNum')}</span><kbd class="kbd-badge">0–9 + Enter</kbd></div>
-              <div class="shortcut-row"><span>${t('shortcuts.exit')}</span><kbd class="kbd-badge">Esc</kbd></div>
-            </div>
-          </div>
-          <div class="reel-cue-modal-footer">
-            <span class="prop-subtext">${t('shortcuts.footerHint')}</span>
-            <button class="btn btn-prominent" id="btn-shortcuts-done" type="button">${t('shortcuts.doneBtn')}</button>
-          </div>
-        </div>
-      </div>
-    `;
-
-    host.querySelector('#btn-shortcuts-close')?.addEventListener('click', cleanup);
-    host.querySelector('#btn-shortcuts-done')?.addEventListener('click', cleanup);
-    host.querySelector('#shortcuts-modal-backdrop')?.addEventListener('click', (e) => {
-      if ((e.target as HTMLElement).id === 'shortcuts-modal-backdrop') {
-        cleanup();
-      }
     });
-    (host.querySelector('#btn-shortcuts-done') as HTMLElement | null)?.focus();
   }
 
   public closeShortcutsHelpModal(): void {
@@ -7956,10 +7229,6 @@ export class MotionPresentationApp {
   }
 
   private escapeHtml(str: string): string {
-    return str
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+    return escapeHtml(str);
   }
 }
