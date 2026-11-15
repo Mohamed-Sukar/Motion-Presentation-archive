@@ -10,7 +10,10 @@ import { renderTimelineDockView } from '../src/ui/components/TimelineDockView';
 import { openSlideContextMenuView } from '../src/ui/components/SlideContextMenu';
 import { openCommandPaletteModal } from '../src/ui/modals/CommandPaletteModal';
 import { openShortcutsHelpModalView } from '../src/ui/modals/ShortcutsHelpModal';
+import { openAboutModalView } from '../src/ui/modals/AboutModal';
 import { Icons } from '../src/ui/icons';
+import { getSavedStudioSkin, getStudioSkin, SKIN_STORAGE_KEY, STUDIO_SKINS } from '../src/ui/skins';
+import { getResolvedTheme, resetThemeStateForTesting, selectStudioSkin } from '../src/ui/theme';
 import { MotionPresentationApp } from '../src/ui/App';
 
 export async function runUiComponentsTests(): Promise<{ passed: number; failed: number }> {
@@ -142,6 +145,7 @@ export async function runUiComponentsTests(): Promise<{ passed: number; failed: 
             onStartFullscreen: () => {
               playCount++;
             },
+            onOpenMoreMenu: () => {},
           }
         );
       }
@@ -149,28 +153,35 @@ export async function runUiComponentsTests(): Promise<{ passed: number; failed: 
       assert.ok(toolbarHost.querySelector('.toolbar-io-cluster'), 'Toolbar must group I/O buttons');
       assert.ok(toolbarHost.querySelector('.toolbar-creation-cluster'), 'Toolbar must group creation tools');
       assert.ok(toolbarHost.querySelector('.toolbar-history-cluster'), 'Toolbar must group history tools');
+      assert.ok(toolbarHost.querySelector('#btn-toolbar-more'), 'Toolbar must render pull-down More menu button');
       const countAfter20 = scope.getActiveListenerCount();
-      assert.equal(countAfter20, 16, 'Toolbar must have exact fixed listener count after 20 re-renders');
+      assert.equal(countAfter20, 17, 'Toolbar must have exact fixed listener count after 20 re-renders');
 
       (toolbarHost.querySelector('#btn-start-fullscreen') as any)?.click();
       assert.equal(playCount, 1, 'Play CTA must fire exactly once');
 
-      // Empty Stage Launchpad
+      // Empty Stage Concept 01 Two-Column Welcome Hub
       const emptyScope = scope.createChildScope();
-      renderEmptyStageView(overlayHost as any, hudHost as any, emptyScope, 0, {
+      renderEmptyStageView(overlayHost as any, hudHost as any, emptyScope, 0, [], {
         onImportMedia: () => {
           importCount++;
         },
         onOpenReelWorkflow: () => {},
         onGenerateDemo: () => {},
         onOpenProject: () => {},
+        onOpenRecentSession: () => {},
+        onTogglePinRecentSession: () => {},
+        onRevealRecentSession: () => {},
+        onRemoveRecentSession: () => {},
+        onClearUnpinnedRecents: () => {},
       });
-      assert.ok(overlayHost.querySelector('.empty-launchpad-grid'), 'Launchpad bento grid must render');
+      assert.ok(overlayHost.querySelector('#empty-drop-card.welcome-hub'), 'Welcome two-column hub must render');
       assert.equal(
-        overlayHost.querySelectorAll('.empty-workflow-card').length,
-        3,
-        'Launchpad must render 3 primary workflow cards'
+        overlayHost.querySelectorAll('.welcome-action-row').length,
+        4,
+        'Welcome hub must render all 4 primary action rows'
       );
+      assert.ok(overlayHost.querySelector('#welcome-recent-search'), 'Welcome hub must render previous sessions search');
       (overlayHost.querySelector('#btn-empty-import') as any)?.click();
       assert.equal(importCount, 1);
 
@@ -301,6 +312,20 @@ export async function runUiComponentsTests(): Promise<{ passed: number; failed: 
       assert.equal(shortcutsClosed, true);
       assert.equal(modalScope.getActiveListenerCount(), 0);
 
+      // 2b. About modal renders Concept 10 squircle, version badge, and cleans up on Escape
+      let aboutClosed = false;
+      openAboutModalView(host as any, modalScope, '1.2.1', () => {
+        aboutClosed = true;
+      });
+      assert.ok(host.querySelector('#about-modal-backdrop'), 'About modal must open');
+      assert.ok(
+        host.querySelector('.about-modal-version')?.textContent?.includes('1.2.1'),
+        'About modal must display version string'
+      );
+      env.window.dispatchEvent(new MockKeyboardEvent('keydown', { key: 'Escape' }));
+      assert.equal(aboutClosed, true);
+      assert.equal(modalScope.getActiveListenerCount(), 0);
+
       // 3. Context Menu cleans up window/document listeners on action click
       let duplicatedId = '';
       openSlideContextMenuView(
@@ -334,10 +359,161 @@ export async function runUiComponentsTests(): Promise<{ passed: number; failed: 
       // 4. Full MotionPresentationApp dispose() runs cleanly
       const appRoot = env.document.createElement('div');
       const app = new MotionPresentationApp(appRoot as any);
-      assert.ok(appRoot.querySelector('.empty-launchpad-grid'), 'App initial shell mounts Launchpad');
+      assert.ok(appRoot.querySelector('#empty-drop-card.welcome-hub'), 'App initial shell mounts Welcome Hub');
       app.dispose();
     } finally {
       modalScope.dispose();
+      env.teardown();
+    }
+  });
+
+  await test('UI-04', 'Studio skins, Activity Rail, Skin Popover, Overview Grid & Chamfer SVG icons work cleanly', () => {
+    const env = setupMockDOM();
+    let app: MotionPresentationApp | null = null;
+    try {
+      // 1. Chamfer Pro icon set must strictly contain crisp SVGs and zero emojis
+      const emojiRegex = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
+      for (const [key, svg] of Object.entries(Icons)) {
+        assert.ok(svg.includes('<svg'), `Icons.${key} must render SVG`);
+        assert.equal(emojiRegex.test(svg), false, `Icons.${key} must not contain emojis`);
+      }
+
+      // 2. All 6 Studio Skins apply and persist cleanly
+      assert.equal(STUDIO_SKINS.length, 6, 'Must define 6 curated studio skins');
+      for (const skin of STUDIO_SKINS) {
+        selectStudioSkin(skin.id);
+        assert.equal(getStudioSkin(), skin.id);
+        assert.equal(env.document.documentElement.dataset.skin, skin.id);
+        assert.equal((globalThis as any).localStorage.getItem(SKIN_STORAGE_KEY), skin.id);
+        assert.equal(getSavedStudioSkin(), skin.id);
+        assert.equal(getResolvedTheme(), skin.mode);
+      }
+      selectStudioSkin('framer');
+
+      // 3. Empty Launchpad -> Workspace Rail -> M1 Skin Popover & G1 Overview toggle
+      const appRoot = env.document.createElement('div');
+      app = new MotionPresentationApp(appRoot as any);
+
+      assert.ok(appRoot.querySelector('.split-view.is-deck-empty'), 'Empty deck must trigger full-bleed Launchpad');
+      assert.ok(appRoot.querySelector('#activity-rail.hidden'), 'Activity rail hides during full-bleed Launchpad');
+
+      const store = (app as any).store;
+      store.addSlideFromImage(makeMockImageAsset('s1', 'slide_1.png'));
+      store.addSlideFromImage(makeMockImageAsset('s2', 'slide_2.png'));
+
+      assert.equal(appRoot.querySelector('.split-view')?.classList.contains('is-deck-empty'), false, 'Deck with slides exits empty mode');
+      const railSkinsBtn = appRoot.querySelector('#rail-btn-skins') as HTMLElement | null;
+      assert.ok(railSkinsBtn, 'Rail Skins button must exist when deck has slides');
+      railSkinsBtn.click();
+
+      const popoverCard = appRoot.querySelector('#skin-popover-host .skin-popover-card');
+      assert.ok(popoverCard, 'Clicking Rail Skins opens M1 Skin Popover');
+      assert.equal(appRoot.querySelectorAll('#skin-popover-host [data-pick-skin]').length, 6);
+
+      (appRoot.querySelector('#skin-popover-host [data-pick-skin="capcut"]') as HTMLElement | null)?.click();
+      assert.equal(env.document.documentElement.dataset.skin, 'capcut', 'Popover click switches active skin immediately');
+
+      (appRoot.querySelector('#rail-btn-overview') as HTMLElement | null)?.click();
+      const ovGrid = appRoot.querySelector('#stage-overview-grid') as HTMLElement | null;
+      assert.ok(ovGrid && ovGrid.style.display === 'flex', 'Overview button reveals G1 Bento Overview Grid');
+      assert.equal(appRoot.querySelectorAll('#stage-overview-grid .overview-bento-card').length, 2);
+
+      app.dispose();
+      app = null;
+    } finally {
+      app?.dispose();
+      resetThemeStateForTesting();
+      env.teardown();
+    }
+  });
+
+  await test('UI-05', 'Unified single sequence, Stage Popover, Slim Inspector modals & responsive overlay drawer work cleanly', () => {
+    const env = setupMockDOM();
+    const baselineListeners = ComponentScope.getGlobalActiveListenerCount();
+    let app: MotionPresentationApp | null = null;
+    try {
+      const appRoot = env.document.createElement('div');
+      app = new MotionPresentationApp(appRoot as any);
+      const store = (app as any).store;
+      store.addSlideFromImage(makeMockImageAsset('u1', 'slide_1.png'));
+      store.addSlideFromImage(makeMockImageAsset('u2', 'slide_2.png'));
+
+      const navPane = appRoot.querySelector('#navigator-pane') as HTMLElement;
+      const dock = appRoot.querySelector('#studio-timeline-dock') as HTMLElement;
+      const restoreBtn = appRoot.querySelector('#btn-stage-show-sequence') as HTMLElement;
+
+      // 1. Mutually exclusive sequence modes: initially bottom dock active, side navigator collapsed
+      assert.equal(dock.classList.contains('hidden'), false, 'Bottom timeline dock active initially');
+      assert.equal(navPane.classList.contains('collapsed'), true, 'Side navigator collapsed while dock active');
+
+      // Switch to side list via dock button -> dock hides, side navigator expands
+      (appRoot.querySelector('#btn-dock-to-side') as any)?.click();
+      assert.equal(dock.classList.contains('hidden'), true, 'Dock hides when switched to side list');
+      assert.equal(navPane.classList.contains('collapsed'), false, 'Side navigator reveals cleanly');
+
+      // Switch back to bottom via navigator header button
+      (appRoot.querySelector('#btn-nav-to-bottom') as any)?.click();
+      assert.equal(dock.classList.contains('hidden'), false, 'Dock reveals when switched back');
+      assert.equal(navPane.classList.contains('collapsed'), true, 'Side navigator hides cleanly');
+
+      // 2. Stage & Aspect Ratio Popover switches ratio + sequence hidden mode
+      (appRoot.querySelector('#btn-stage-settings') as any)?.click();
+      assert.ok(appRoot.querySelector('#stage-settings-card'), 'Toolbar #btn-stage-settings opens Stage Popover');
+
+      (appRoot.querySelector('[data-pick-ratio="9:16"]') as any)?.click();
+      assert.equal(store.getSettings().aspectRatio, '9:16', 'Popover changes aspect ratio live');
+
+      (appRoot.querySelector('[data-pick-layout="hidden"]') as any)?.click();
+      assert.equal(dock.classList.contains('hidden'), true, 'Hidden layout hides bottom dock');
+      assert.equal(navPane.classList.contains('collapsed'), true, 'Hidden layout hides side navigator');
+      assert.equal(restoreBtn.style.display, 'inline-flex', 'Floating restore pill shows when sequence is hidden');
+
+      restoreBtn.click();
+      assert.equal(dock.classList.contains('hidden') && navPane.classList.contains('collapsed'), false, 'Restore pill brings back sequence');
+      (appRoot.querySelector('#btn-close-stage-popover') as any)?.click();
+      assert.equal(appRoot.querySelector('#stage-settings-card'), null, 'Stage popover closes cleanly');
+
+      // 3. Slim Inspector specialized modals (Idle Loop, Surgical AI, Engine Prefs, Deck Diagnostics)
+      (appRoot.querySelector('#btn-open-idle-loop-modal') as any)?.click();
+      assert.ok(appRoot.querySelector('#workspace-modal-backdrop'), 'Slide tab opens Idle Loop modal');
+      (appRoot.querySelector('#btn-close-workspace-modal') as any)?.click();
+      assert.equal(appRoot.querySelector('#workspace-modal-backdrop'), null);
+
+      (appRoot.querySelector('#btn-open-ai-edit-modal') as any)?.click();
+      assert.ok(appRoot.querySelector('#surgical-ai-modal-body'), 'Opens Surgical AI modal');
+      (appRoot.querySelector('#btn-close-workspace-modal') as any)?.click();
+
+      store.setSelection({ type: 'settings' });
+      (appRoot.querySelector('#btn-open-engine-prefs-modal') as any)?.click();
+      assert.ok(appRoot.querySelector('#mod-interrupt-behavior'), 'Settings tab opens Engine Preferences modal');
+      (appRoot.querySelector('#btn-close-workspace-modal') as any)?.click();
+
+      (appRoot.querySelector('#btn-open-deck-stats-modal') as any)?.click();
+      assert.ok(appRoot.querySelector('#workspace-modal-backdrop .diagnostics-grid'), 'Opens Deck Diagnostics modal');
+      (appRoot.querySelector('#btn-done-workspace-modal') as any)?.click();
+
+      // 4. Responsive Stage-First Overlay Drawer on narrow split window
+      const splitView = appRoot.querySelector('.split-view') as any;
+      splitView.getBoundingClientRect = () => ({ width: 700, height: 480, top: 0, left: 0, right: 700, bottom: 480 });
+      (app as any).handleViewportResize();
+      assert.equal(splitView.classList.contains('is-compact-width'), true, 'Compact width class applied below 760px');
+      assert.equal(splitView.classList.contains('is-compact-height'), true, 'Compact height class applied below 640px');
+      assert.equal(splitView.classList.contains('is-inspector-overlay'), false, '700px fits >=60% stage (420px) + 280px docked inspector');
+
+      splitView.getBoundingClientRect = () => ({ width: 600, height: 480, top: 0, left: 0, right: 600, bottom: 480 });
+      (app as any).handleViewportResize();
+      assert.equal(splitView.classList.contains('is-inspector-overlay'), true, 'Inspector converts to overlay drawer below budget to protect >= 60% Stage width');
+      assert.ok(appRoot.querySelector('#btn-close-floating-inspector'), 'Overlay drawer provides quick dismiss button');
+
+      app.dispose();
+      app = null;
+      assert.ok(
+        ComponentScope.getGlobalActiveListenerCount() <= baselineListeners,
+        'Disposing app must leave zero leaked listeners'
+      );
+    } finally {
+      app?.dispose();
+      resetThemeStateForTesting();
       env.teardown();
     }
   });

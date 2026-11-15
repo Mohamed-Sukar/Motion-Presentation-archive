@@ -15,7 +15,9 @@ export interface TimelineDockRenderProps {
 export interface TimelineDockCallbacks {
   onOpenCues: () => void;
   onToggleCollapse: () => void;
+  onSwitchToSide?: () => void;
   onSelectSlide: (slideId: string) => void;
+  onContextMenuSlide?: (slideId: string, clientX: number, clientY: number) => void;
   onSelectTransition: (slideId: string) => void;
 }
 
@@ -45,29 +47,50 @@ export function renderTimelineDockView(
   const nodesHtml = slides
     .map((slide, idx) => {
       const isSlideActive = slide.id === props.activeSlideId && !props.isTransitionSelected;
+      const numLabel = String(idx + 1).padStart(2, '0');
+      const hasLoop = Boolean(slide.idleLoopAsset);
+      const holdBadge = slide.holdDurationSec ? `${slide.holdDurationSec}s` : '';
       const thumbHtml = slide.imageAsset.objectUrl
         ? `<img src="${escapeHtml(slide.imageAsset.objectUrl)}" alt="" />`
-        : `<span class="tabular-nums">${idx + 1}</span>`;
+        : `<span class="tabular-nums dock-thumb-fallback">${numLabel}</span>`;
+
       const slideBtn = `
         <button
           type="button"
-          class="dock-seq-node ${isSlideActive ? 'active' : ''}"
+          class="dock-seq-node dock-ribbon-card ${isSlideActive ? 'active' : ''}"
           data-dock-slide-id="${escapeHtml(slide.id)}"
           title="${escapeHtml(slide.title)}"
         >
-          <span class="dock-seq-thumb">${thumbHtml}</span>
-          <span class="dock-seq-label tabular-nums">${String(idx + 1).padStart(2, '0')} · ${escapeHtml(slide.title)}</span>
+          <span class="dock-seq-thumb">
+            ${thumbHtml}
+            <span class="dock-seq-num tabular-nums">${numLabel}</span>
+            ${hasLoop ? `<span class="dock-seq-loop-tag" title="Idle Loop">${Icons.replay}</span>` : ''}
+          </span>
+          <span class="dock-seq-meta">
+            <span class="dock-seq-label">${escapeHtml(slide.title)}</span>
+            ${holdBadge ? `<span class="dock-seq-hold tabular-nums">${holdBadge}</span>` : ''}
+          </span>
         </button>
       `;
 
       if (idx >= slides.length - 1) return slideBtn;
 
-      const hasVideo = Boolean(slide.transitionToNext.videoAsset);
+      const spec = slide.transitionToNext;
+      const vid = spec.videoAsset;
+      const hasVideo = Boolean(vid);
       const isTransActive =
         props.isTransitionSelected && props.selectedTransitionSlideId === slide.id;
       const bridgeTitle = hasVideo
-        ? slide.transitionToNext.videoAsset?.name || t('ctx.editTransition')
+        ? vid?.name || t('ctx.editTransition')
         : t('inspector.fallbackStyleLabel');
+
+      let durText = `${((spec.fallbackDurationMs || 700) / 1000).toFixed(1)}s`;
+      if (vid) {
+        const segStart = Math.max(0, spec.startTimeSec ?? 0);
+        const segEnd = Math.max(segStart, spec.endTimeSec ?? vid.durationSec);
+        const eff = (segEnd - segStart) / Math.max(0.25, spec.playbackSpeed || 1);
+        durText = `${eff.toFixed(1)}s`;
+      }
 
       return `${slideBtn}
         <button
@@ -76,7 +99,10 @@ export function renderTimelineDockView(
           data-dock-trans-slide-id="${escapeHtml(slide.id)}"
           title="${escapeHtml(bridgeTitle)}"
           aria-label="${escapeHtml(bridgeTitle)}"
-        >${hasVideo ? Icons.filmTransition : bridgeArrow}</button>`;
+        >
+          <span class="dock-bridge-ico">${hasVideo ? Icons.filmTransition : bridgeArrow}</span>
+          <span class="dock-bridge-dur tabular-nums">${durText}</span>
+        </button>`;
     })
     .join('');
 
@@ -92,6 +118,19 @@ export function renderTimelineDockView(
           ${Icons.splitCue}
           <span>${escapeHtml(t('dock.openCuesBtn'))}</span>
         </button>
+        ${
+          callbacks.onSwitchToSide
+            ? `<button
+          type="button"
+          class="btn btn-icon-only"
+          id="btn-dock-to-side"
+          title="${escapeHtml(t('layout.switchToSide'))}"
+          aria-label="${escapeHtml(t('layout.switchToSide'))}"
+        >
+          ${rtl ? Icons.sidebarRight : Icons.sidebarLeft}
+        </button>`
+            : ''
+        }
         <button
           type="button"
           class="btn btn-icon-only"
@@ -110,6 +149,7 @@ export function renderTimelineDockView(
   `;
 
   scope.listen(dock.querySelector('#btn-stage-open-cues'), 'click', callbacks.onOpenCues);
+  scope.listen(dock.querySelector('#btn-dock-to-side'), 'click', () => callbacks.onSwitchToSide?.());
   scope.listen(
     dock.querySelector('#btn-toggle-timeline-dock'),
     'click',
@@ -121,6 +161,14 @@ export function renderTimelineDockView(
       const slideId = (btn as HTMLElement).dataset.dockSlideId;
       if (slideId) callbacks.onSelectSlide(slideId);
     });
+    if (callbacks.onContextMenuSlide) {
+      scope.listen(btn, 'contextmenu', (e) => {
+        const ev = e as MouseEvent;
+        ev.preventDefault();
+        const slideId = (btn as HTMLElement).dataset.dockSlideId;
+        if (slideId) callbacks.onContextMenuSlide?.(slideId, ev.clientX, ev.clientY);
+      });
+    }
   });
 
   dock.querySelectorAll('.dock-seq-bridge').forEach((btn) => {
@@ -158,7 +206,7 @@ export function syncTimelineDockCollapseView(
 ): void {
   if (!dock) return;
   dock.classList.toggle('is-collapsed', isCollapsed);
-  const toggleBtn = dock.querySelector('#btn-toggle-timeline-dock');
+  const toggleBtn = dock.querySelector('#btn-toggle-timeline-dock') as HTMLButtonElement | null;
   if (toggleBtn) {
     toggleBtn.setAttribute('aria-expanded', String(!isCollapsed));
     toggleBtn.innerHTML = isCollapsed ? Icons.chevronUp : Icons.chevronDown;

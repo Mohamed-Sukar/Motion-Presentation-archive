@@ -1,11 +1,8 @@
 import {
   AspectRatioOption,
-  BackwardBehavior,
   EngineStatus,
   FallbackTransitionStyle,
   FitMode,
-  HudVisibility,
-  InterruptBehavior,
   MediaAsset,
   MediaKind,
   PresentationSettings,
@@ -33,6 +30,15 @@ import {
   StreamingSaveResult,
   projectFiles,
 } from '../core/services/ProjectFileService';
+import {
+  clearUnpinnedRecentSessions,
+  listRecentSessions,
+  RecentSessionEntry,
+  recordRecentSession,
+  removeRecentSession,
+  revealRecentSessionInFolder,
+  togglePinRecentSession,
+} from '../core/services/RecentSessionsService';
 import { CueDetectionResult, CueDetectionSensitivity, SmartPairer } from '../core/services/SmartPairer';
 import { MotionReelImporter, MotionReelMetadata } from '../core/services/MotionReelImporter';
 import {
@@ -58,6 +64,11 @@ import {
 } from './components/ToolbarView';
 import { renderEmptyStageView } from './components/EmptyStageView';
 import {
+  closeActiveAppleMenu,
+  enhanceAppleSelects,
+  openAppleMenu,
+} from './components/AppleDropdown';
+import {
   renderStageHudView,
   resetStageHudStructure,
 } from './components/StageHudView';
@@ -67,9 +78,7 @@ import {
   syncTimelineDockCollapseView,
 } from './components/TimelineDockView';
 import {
-  renderSurgicalAiPromptMarkup,
   SurgicalAiScope,
-  wireSurgicalAiPromptView,
 } from './components/SurgicalAiPromptView';
 import {
   openSlideContextMenuView,
@@ -79,11 +88,24 @@ import {
   StudioCommandItem,
 } from './modals/CommandPaletteModal';
 import { openShortcutsHelpModalView } from './modals/ShortcutsHelpModal';
+import { FALLBACK_APP_VERSION, openAboutModalView } from './modals/AboutModal';
+import {
+  openDeckDiagnosticsModal,
+  openEnginePreferencesModal,
+  openIdleLoopModal,
+  openStageSettingsPopover,
+  openSurgicalAiModal,
+  openTransitionTrimModal,
+  SequenceLayoutPreference,
+} from './modals/WorkspaceModals';
 import { Icons } from './icons';
+import { getStudioSkin, STUDIO_SKINS, StudioSkinId } from './skins';
 import {
   cycleThemePreference,
   detectInitialTheme,
   getThemePreference,
+  selectStudioSkin,
+  setThemePreference,
   STAGE_COLOR_SWATCHES,
   ThemePreference,
 } from './theme';
@@ -95,11 +117,13 @@ declare global {
       setFullScreen: (flag: boolean) => Promise<boolean>;
       isFullScreen: () => Promise<boolean>;
       setWindowTitle?: (title: string) => Promise<void>;
+      getAppVersion?: () => Promise<string>;
       getSystemLocale?: () => Promise<'ar' | 'en'>;
       setLanguage?: (lang: 'ar' | 'en') => Promise<'ar' | 'en'>;
       setTheme?: (theme: 'system' | 'dark' | 'light') => Promise<'dark' | 'light'>;
       openProjectStreamedDialog?: () => Promise<OpenedProjectDescriptor | null>;
       openProjectByPath?: (filePath: string) => Promise<OpenedProjectDescriptor>;
+      openDemoProject?: () => Promise<OpenedProjectDescriptor | null>;
       saveProjectStreamed?: (payload: StreamingSavePayload) => Promise<StreamingSaveResult | null>;
       closeProjectToken?: (projectToken: string) => Promise<void>;
       onSaveProgress?: (
@@ -137,9 +161,17 @@ declare global {
       openMediaDialog?: () => Promise<Array<{ fileName: string; mimeType: string; buffer: ArrayBuffer }> | null>;
       onMenuCommand?: (callback: (command: string) => void) => void;
       getPathForFile?: (file: File) => string | null;
+      listRecentProjects?: () => Promise<RecentSessionEntry[]>;
+      upsertRecentProject?: (entry: Partial<RecentSessionEntry> & { filePath: string }) => Promise<RecentSessionEntry[]>;
+      togglePinRecentProject?: (filePath: string) => Promise<RecentSessionEntry[]>;
+      removeRecentProject?: (filePath: string) => Promise<RecentSessionEntry[]>;
+      clearRecentProjects?: () => Promise<RecentSessionEntry[]>;
+      revealRecentProject?: (filePath: string) => Promise<boolean>;
     };
   }
 }
+
+const SEQUENCE_LAYOUT_STORAGE_KEY = 'mpres_sequence_layout_v1';
 
 export class MotionPresentationApp {
   private root: HTMLElement;
@@ -149,16 +181,21 @@ export class MotionPresentationApp {
   private previewEngine!: StagePlaybackEngine;
   private latestEngineStatus!: EngineStatus;
 
-  private isNavigatorVisible = true;
+  private isNavigatorVisible = false;
   private isInspectorVisible = true;
-  private navigatorWidth = 288;
-  private inspectorWidth = 320;
-  private readonly defaultNavigatorWidth = 288;
-  private readonly defaultInspectorWidth = 320;
+  private isInspectorOverlayMode = false;
+  private sequenceLayoutPref: SequenceLayoutPreference = 'auto';
+  private isStageOverviewOpen = false;
+  private isSkinPopoverOpen = false;
+  private isStageSettingsOpen = false;
+  private navigatorWidth = 264;
+  private inspectorWidth = 280;
+  private readonly defaultNavigatorWidth = 264;
+  private readonly defaultInspectorWidth = 280;
   private readonly minNavigatorWidth = 200;
-  private readonly maxNavigatorWidth = 480;
-  private readonly minInspectorWidth = 260;
-  private readonly maxInspectorWidth = 520;
+  private readonly maxNavigatorWidth = 440;
+  private readonly minInspectorWidth = 240;
+  private readonly maxInspectorWidth = 440;
   private isPresentingFullscreen = false;
   private isSlideGridOpen = false;
   private isGeneratingDemo = false;
@@ -166,6 +203,7 @@ export class MotionPresentationApp {
   private aiEditDraftInstruction = '';
   private aiEditScopeOverride: SurgicalAiScope | null = null;
   private currentProjectFilePath: string | null = null;
+  private recentSessions: RecentSessionEntry[] = [];
   private presenterCursorTimer: number | null = null;
   private presenterOverlayEl: HTMLElement | null = null;
   private presenterEngine: StagePlaybackEngine | null = null;
@@ -177,7 +215,6 @@ export class MotionPresentationApp {
   private onPresenterMouseMove: ((e: MouseEvent) => void) | null = null;
   private isModalOpen = false;
   private activeModalClose: (() => void) | null = null;
-  private activeInspectorSplitSession: VideoFrameExtractorSession | null = null;
   private pendingRelinkTarget: string | string[] | null = null;
   private draggedSlideId: string | null = null;
   private navigatorSearchQuery = '';
@@ -193,12 +230,18 @@ export class MotionPresentationApp {
   private closeContextMenuFn: (() => void) | null = null;
   private readonly rootScope = new ComponentScope();
   private readonly toolbarScope = this.rootScope.createChildScope();
+  private readonly activityRailScope = this.rootScope.createChildScope();
+  private readonly overviewGridScope = this.rootScope.createChildScope();
+  private readonly skinPopoverScope = this.rootScope.createChildScope();
   private readonly emptyStageScope = this.rootScope.createChildScope();
   private readonly stageHudScope = this.rootScope.createChildScope();
   private readonly timelineDockScope = this.rootScope.createChildScope();
-  private readonly inspectorAiScope = this.rootScope.createChildScope();
+  private readonly inspectorSelectsScope = this.rootScope.createChildScope();
+  private readonly reelSelectsScope = this.rootScope.createChildScope();
   private readonly contextMenuScope = this.rootScope.createChildScope();
   private readonly modalScope = this.rootScope.createChildScope();
+  private readonly workspaceModalScope = this.rootScope.createChildScope();
+  private readonly stagePopoverScope = this.rootScope.createChildScope();
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -212,22 +255,28 @@ export class MotionPresentationApp {
     this.syncThemeToDesktop(getThemePreference());
     this.store = new PresentationStore();
     this.loadSavedPanelWidths();
+    this.loadSequenceLayoutPref();
     this.mountInitialShell();
     this.applyPanelWidths(false);
     this.bindPaneResizers();
+    this.bindViewportResizeSync();
     this.bindGlobalShortcuts();
     this.bindNativeMenuCommands();
     this.bindDesktopProjectOpenEvents();
     this.store.subscribe((changeType) => this.onStoreUpdated(changeType));
     this.onStoreUpdated();
+    void this.refreshRecentSessions();
     void this.syncDesktopLanguageAndLocale(initialLang);
     void this.consumeInitialProjectFile();
   }
 
   public dispose(): void {
-    this.disposeActiveSplitSession();
     this.activeModalClose?.();
+    this.closeStageSettingsPopover();
     this.closeSlideContextMenu();
+    closeActiveAppleMenu();
+    this.workspaceModalScope.clear();
+    this.stagePopoverScope.clear();
     this.rootScope.dispose();
     this.previewEngine?.destroy?.();
     this.presenterEngine?.destroy?.();
@@ -329,12 +378,184 @@ export class MotionPresentationApp {
     }
   }
 
+  private loadSequenceLayoutPref(): void {
+    try {
+      const saved = this.getLocalStorageSafe()?.getItem(SEQUENCE_LAYOUT_STORAGE_KEY);
+      if (saved === 'auto' || saved === 'bottom' || saved === 'side' || saved === 'hidden') {
+        this.sequenceLayoutPref = saved;
+      }
+    } catch {
+      // Ignore storage errors
+    }
+    this.isNavigatorVisible = this.sequenceLayoutPref === 'side';
+  }
+
+  private setSequenceLayoutPreference(pref: SequenceLayoutPreference): void {
+    this.sequenceLayoutPref = pref;
+    if (pref === 'bottom') {
+      this.isTimelineDockCollapsed = false;
+    }
+    try {
+      this.getLocalStorageSafe()?.setItem(SEQUENCE_LAYOUT_STORAGE_KEY, pref);
+    } catch {
+      // Ignore storage errors
+    }
+    this.reconcileWorkspaceLayout();
+    this.renderWindowToolbar();
+    this.renderActivityRail();
+    this.renderNavigatorPane();
+    this.renderStudioTimelineDock();
+    this.handleViewportResize();
+  }
+
+  private resolveEffectiveSequenceMode(
+    splitWidth: number,
+    splitHeight: number
+  ): 'bottom' | 'side' | 'hidden' {
+    const slides = this.store.getSlides();
+    if (slides.length === 0) return 'hidden';
+
+    const ratio = this.store.getSettings().aspectRatio;
+    const pref = this.sequenceLayoutPref;
+
+    if (pref === 'hidden') return 'hidden';
+
+    if (pref === 'bottom') {
+      if (splitHeight > 0 && splitHeight < 430) {
+        return splitWidth >= 880 ? 'side' : 'hidden';
+      }
+      return 'bottom';
+    }
+
+    if (pref === 'side') {
+      if (splitWidth > 0 && splitWidth < 740) {
+        return splitHeight >= 480 ? 'bottom' : 'hidden';
+      }
+      return 'side';
+    }
+
+    // 'auto' mode: adapt intelligently to slide aspect ratio + window geometry
+    if (splitWidth > 0 && splitHeight > 0) {
+      if (splitWidth < 640 && splitHeight < 500) {
+        return 'hidden';
+      }
+      if (ratio === '9:16' && splitWidth >= 780) {
+        return 'side';
+      }
+      if (splitHeight < 520 && splitWidth >= 880) {
+        return 'side';
+      }
+      return 'bottom';
+    }
+
+    return this.isNavigatorVisible ? 'side' : 'bottom';
+  }
+
+  private reconcileWorkspaceLayout(): void {
+    const splitView = this.root.querySelector('.split-view') as HTMLElement | null;
+    if (!splitView) return;
+
+    const rect = splitView.getBoundingClientRect?.();
+    const splitW = rect?.width || 0;
+    const splitH = rect?.height || 0;
+    const slides = this.store.getSlides();
+
+    if (slides.length === 0) {
+      this.isInspectorOverlayMode = false;
+      splitView.classList.remove('is-inspector-overlay', 'is-compact-height', 'is-compact-width');
+      return;
+    }
+
+    const effectiveSeq = this.resolveEffectiveSequenceMode(splitW, splitH);
+    const shouldShowSideNav = effectiveSeq === 'side';
+    const shouldShowBottomDock = effectiveSeq === 'bottom';
+
+    this.isNavigatorVisible = shouldShowSideNav;
+
+    const navPane = this.root.querySelector('#navigator-pane') as HTMLElement | null;
+    const navResizer = this.root.querySelector('#navigator-resizer') as HTMLElement | null;
+    navPane?.classList.toggle('collapsed', !shouldShowSideNav);
+    navResizer?.classList.toggle('collapsed', !shouldShowSideNav);
+
+    const dock = this.root.querySelector('#studio-timeline-dock') as HTMLElement | null;
+    if (dock) {
+      dock.classList.toggle('hidden', !shouldShowBottomDock);
+      dock.classList.toggle('is-collapsed', this.isTimelineDockCollapsed);
+    }
+
+    const stagePane = this.root.querySelector('#stage-pane') as HTMLElement | null;
+    const compactHeight = splitH > 0 && splitH < 640;
+    const compactWidth = splitW > 0 && splitW < 760;
+    splitView.classList.toggle('is-compact-height', compactHeight);
+    splitView.classList.toggle('is-compact-width', compactWidth);
+    stagePane?.classList.toggle('is-compact-height', compactHeight);
+
+    const restoreBtn = this.root.querySelector('#btn-stage-show-sequence') as HTMLElement | null;
+    if (restoreBtn) {
+      restoreBtn.style.display = effectiveSeq === 'hidden' ? 'inline-flex' : 'none';
+    }
+  }
+
+  private getResponsivePanelWidths(splitView: HTMLElement | null): {
+    navigatorWidth: number;
+    inspectorWidth: number;
+    overlayInspector: boolean;
+  } {
+    let navW = this.navigatorWidth;
+    let inspW = this.inspectorWidth;
+    let overlayInspector = false;
+
+    const splitWidth = splitView?.getBoundingClientRect?.().width || 0;
+    if (splitWidth > 0 && !splitView?.classList.contains('is-deck-empty')) {
+      const compactW = splitWidth < 760;
+      const railWidth = compactW ? 0 : 42;
+      const guaranteedStageWidth = Math.min(
+        splitWidth - railWidth - 20,
+        Math.max(420, Math.floor(splitWidth * 0.60))
+      );
+      const budget = Math.max(0, splitWidth - railWidth - guaranteedStageWidth);
+      const activeNav = this.isNavigatorVisible ? navW : 0;
+      const activeInsp = this.isInspectorVisible ? inspW : 0;
+
+      if (activeNav + activeInsp > budget) {
+        if (this.isInspectorVisible && activeNav + this.minInspectorWidth > budget) {
+          overlayInspector = true;
+          inspW = Math.min(inspW, Math.max(240, splitWidth - 48));
+        }
+
+        const remainingActiveNav = this.isNavigatorVisible ? navW : 0;
+        const remainingActiveInsp = this.isInspectorVisible && !overlayInspector ? inspW : 0;
+        const remainingTotal = remainingActiveNav + remainingActiveInsp;
+
+        if (remainingTotal > budget && remainingTotal > 0) {
+          const scale = budget / remainingTotal;
+          if (this.isNavigatorVisible) {
+            navW = Math.max(180, Math.floor(navW * scale));
+          }
+          if (this.isInspectorVisible && !overlayInspector) {
+            inspW = Math.max(220, Math.floor(inspW * scale));
+          }
+        }
+      }
+    }
+
+    return { navigatorWidth: navW, inspectorWidth: inspW, overlayInspector };
+  }
+
   private applyPanelWidths(persist = false): void {
     const splitView = this.root.querySelector('.split-view') as HTMLElement | null;
+    const effective = this.getResponsivePanelWidths(splitView);
+    const wasOverlay = this.isInspectorOverlayMode;
+    this.isInspectorOverlayMode = effective.overlayInspector;
+
     if (splitView) {
-      splitView.style?.setProperty?.('--navigator-width', `${this.navigatorWidth}px`);
-      splitView.style?.setProperty?.('--inspector-width', `${this.inspectorWidth}px`);
+      splitView.style?.setProperty?.('--navigator-width', `${effective.navigatorWidth}px`);
+      splitView.style?.setProperty?.('--inspector-width', `${effective.inspectorWidth}px`);
+      splitView.classList.toggle('is-inspector-overlay', effective.overlayInspector);
     }
+
+    const inspPane = this.root.querySelector('#inspector-pane') as HTMLElement | null;
+    inspPane?.classList.toggle('is-overlay-drawer', effective.overlayInspector);
 
     const navResizer = this.root.querySelector('#navigator-resizer') as HTMLElement | null;
     if (navResizer) {
@@ -345,11 +566,39 @@ export class MotionPresentationApp {
     const inspResizer = this.root.querySelector('#inspector-resizer') as HTMLElement | null;
     if (inspResizer) {
       inspResizer.setAttribute('aria-valuenow', String(this.inspectorWidth));
-      inspResizer.classList.toggle('collapsed', !this.isInspectorVisible);
+      inspResizer.classList.toggle('collapsed', !this.isInspectorVisible || effective.overlayInspector);
+    }
+
+    if (wasOverlay !== effective.overlayInspector && this.isInspectorVisible) {
+      this.renderInspectorPane();
     }
 
     if (persist) {
       this.savePanelWidths();
+    }
+  }
+
+  private handleViewportResize(): void {
+    this.reconcileWorkspaceLayout();
+    this.applyPanelWidths(false);
+    this.updateCanvasFrameDimensions(this.store.getSettings());
+    this.previewEngine?.resize?.();
+  }
+
+  private bindViewportResizeSync(): void {
+    this.rootScope.listen(window, 'resize', () => {
+      this.handleViewportResize();
+    });
+
+    if (typeof ResizeObserver !== 'undefined') {
+      const areaEl = this.root.querySelector('.stage-canvas-area') as HTMLElement | null;
+      const splitView = this.root.querySelector('.split-view') as HTMLElement | null;
+      const observer = new ResizeObserver(() => {
+        this.handleViewportResize();
+      });
+      if (areaEl) observer.observe(areaEl);
+      if (splitView) observer.observe(splitView);
+      this.rootScope.addCleanup(() => observer.disconnect());
     }
   }
 
@@ -534,8 +783,10 @@ export class MotionPresentationApp {
 
     this.syncWindowTitle();
     this.renderWindowToolbar();
+    this.renderActivityRail();
     this.renderNavigatorPane();
     this.renderEmptyOverlay();
+    this.renderStageOverviewGrid();
     this.renderFloatingStageHud();
     this.renderStudioTimelineDock();
     this.renderInspectorPane();
@@ -572,6 +823,8 @@ export class MotionPresentationApp {
     const next = cycleThemePreference();
     this.syncThemeToDesktop(next);
     this.renderWindowToolbar();
+    this.renderActivityRail();
+    this.renderInspectorPane();
     this.store.notify(
       t('notify.themeSwitched', { theme: t(`theme.${next}`) }),
       'info',
@@ -582,10 +835,11 @@ export class MotionPresentationApp {
   private mountInitialShell(): void {
     this.root.innerHTML = `
       <header class="window-toolbar" id="window-toolbar" role="toolbar" aria-label="${this.escapeHtml(t('shell.toolbarAria'))}"></header>
-      <main class="split-view">
-        <aside class="navigator-pane" id="navigator-pane" aria-label="${this.escapeHtml(t('shell.navigatorAria'))}"></aside>
+      <main class="split-view is-deck-empty">
+        <nav class="activity-rail" id="activity-rail" aria-label="Workspace tools"></nav>
+        <aside class="navigator-pane collapsed" id="navigator-pane" aria-label="${this.escapeHtml(t('shell.navigatorAria'))}"></aside>
         <div
-          class="pane-resizer pane-resizer-navigator"
+          class="pane-resizer pane-resizer-navigator collapsed"
           id="navigator-resizer"
           role="separator"
           aria-orientation="vertical"
@@ -601,12 +855,17 @@ export class MotionPresentationApp {
             <div class="stage-canvas-frame" id="canvas-frame">
               <canvas class="stage-canvas" id="preview-canvas"></canvas>
             </div>
+            <div class="stage-overview-grid" id="stage-overview-grid" style="display:none;"></div>
             <div class="stage-drop-overlay" id="stage-drop-overlay">
               ${Icons.folderImport}
               <span>${this.escapeHtml(t('shell.dropOverlayText'))}</span>
             </div>
             <div class="empty-canvas-sheet" id="empty-overlay" style="display:none;"></div>
             <div class="floating-stage-hud" id="floating-stage-hud" role="region" aria-label="${this.escapeHtml(t('shell.hudAria'))}"></div>
+            <button type="button" class="btn stage-restore-seq-btn" id="btn-stage-show-sequence" style="display:none;" title="${escapeHtml(t('toolbar.showSlidesTitle'))}">
+              ${Icons.timelineDock}
+              <span>${escapeHtml(t('layout.restoreSequence'))}</span>
+            </button>
           </div>
           <div class="studio-timeline-dock hidden" id="studio-timeline-dock"></div>
         </section>
@@ -625,6 +884,9 @@ export class MotionPresentationApp {
         <aside class="inspector-pane" id="inspector-pane" aria-label="${this.escapeHtml(t('shell.inspectorAria'))}"></aside>
       </main>
       <div id="toast-container" aria-live="polite"></div>
+      <div id="skin-popover-host"></div>
+      <div id="stage-popover-host"></div>
+      <div id="workspace-modal-host"></div>
       <div id="fullscreen-root"></div>
       <div id="choice-modal-host"></div>
       <div id="reel-modal-host"></div>
@@ -655,6 +917,10 @@ export class MotionPresentationApp {
       if (this.store.getSlides().length > 0) {
         this.previewEngine.next();
       }
+    });
+
+    this.rootScope.listen(this.root.querySelector('#btn-stage-show-sequence'), 'click', () => {
+      this.setSequenceLayoutPreference('bottom');
     });
 
     this.setupGlobalDragAndDrop();
@@ -697,6 +963,8 @@ export class MotionPresentationApp {
 
     if (changeType === 'settings') {
       const settings = this.store.getSettings();
+      this.reconcileWorkspaceLayout();
+      this.applyPanelWidths(false);
       this.updateCanvasFrameDimensions(settings);
       this.previewEngine.updateSettingsLive(settings);
       this.presenterEngine?.updateSettingsLive(settings);
@@ -706,14 +974,24 @@ export class MotionPresentationApp {
     }
 
     // Structural changes (slides added/removed, full project loaded)
+    const slides = this.store.getSlides();
+    const splitViewEl = this.root.querySelector('.split-view') as HTMLElement | null;
+    splitViewEl?.classList.toggle('is-deck-empty', slides.length === 0);
+    if (slides.length === 0) {
+      this.isStageOverviewOpen = false;
+    }
+
+    this.reconcileWorkspaceLayout();
+    this.applyPanelWidths(false);
     this.renderWindowToolbar();
+    this.renderActivityRail();
     this.renderNavigatorPane();
     this.renderEmptyOverlay();
+    this.renderStageOverviewGrid();
     this.renderStudioTimelineDock();
     this.renderInspectorPane();
     this.renderToast();
 
-    const slides = this.store.getSlides();
     const settings = this.store.getSettings();
     const targetIdx = this.store.getActivePreviewIndex();
 
@@ -723,7 +1001,7 @@ export class MotionPresentationApp {
   }
 
   private updateCanvasFrameDimensions(settings: PresentationSettings): void {
-    const frameEl = this.root.querySelector('#canvas-frame') as HTMLElement;
+    const frameEl = this.root.querySelector('#canvas-frame') as HTMLElement | null;
     if (!frameEl) return;
     const ratioMap: Record<AspectRatioOption, { css: string; num: number }> = {
       '16:9': { css: '16 / 9', num: 16 / 9 },
@@ -733,7 +1011,26 @@ export class MotionPresentationApp {
     };
     const r = ratioMap[settings.aspectRatio as AspectRatioOption] || ratioMap['16:9'];
     frameEl.style.aspectRatio = r.css;
-    frameEl.style.width = `min(100%, calc((100vh - 160px) * ${r.num}))`;
+
+    const areaEl = this.root.querySelector('.stage-canvas-area') as HTMLElement | null;
+    if (areaEl && typeof window.getComputedStyle === 'function') {
+      const rect = areaEl.getBoundingClientRect?.();
+      if (rect && rect.width > 0 && rect.height > 0) {
+        const cs = window.getComputedStyle(areaEl);
+        const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+        const padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+        const availW = Math.max(120, rect.width - padX);
+        const availH = Math.max(90, rect.height - padY);
+        const fitW = Math.floor(Math.min(availW, availH * r.num));
+        const fitH = Math.floor(fitW / r.num);
+        frameEl.style.width = `${fitW}px`;
+        frameEl.style.height = `${fitH}px`;
+        return;
+      }
+    }
+
+    frameEl.style.width = `min(100%, calc((100vh - 240px) * ${r.num}))`;
+    frameEl.style.height = 'auto';
   }
 
   private syncMultiSelectBar(): void {
@@ -866,6 +1163,7 @@ export class MotionPresentationApp {
         hasSlides: project.slides.length > 0,
         isNavigatorVisible: this.isNavigatorVisible,
         isInspectorVisible: this.isInspectorVisible,
+        isStagePopoverOpen: this.isStageSettingsOpen,
         isGeneratingDemo: this.isGeneratingDemo,
         canUndo: this.store.canUndo?.() ?? false,
         canRedo: this.store.canRedo?.() ?? false,
@@ -912,6 +1210,8 @@ export class MotionPresentationApp {
         onOpenCommandPalette: () => this.openCommandPalette(),
         onToggleTheme: () => this.toggleTheme(),
         onToggleLanguage: () => this.toggleLanguage(),
+        onOpenStageSettings: (anchorEl) => this.toggleStageSettingsPopover(anchorEl),
+        onOpenMoreMenu: (anchorEl) => this.openToolbarMoreMenu(anchorEl),
         onStartFullscreen: () => {
           void this.enterFullscreenPresentation(this.latestEngineStatus?.currentSlideIndex || 0);
         },
@@ -919,15 +1219,311 @@ export class MotionPresentationApp {
     );
   }
 
+  private openToolbarMoreMenu(anchorEl: HTMLElement): void {
+    const hasSlides = this.store.getSlides().length > 0;
+    openAppleMenu({
+      anchorEl,
+      align: 'end',
+      minWidth: 246,
+      ariaLabel: t('toolbar.moreActions'),
+      items: [
+        {
+          label: t('toolbar.saveProject'),
+          icon: Icons.exportDoc,
+          shortcut: 'Ctrl+S',
+          disabled: !hasSlides,
+          onSelect: () => {
+            void this.handleSaveProject(false);
+          },
+        },
+        {
+          label: t('toolbar.saveAs'),
+          icon: Icons.duplicate,
+          shortcut: 'Ctrl+Shift+S',
+          disabled: !hasSlides,
+          onSelect: () => {
+            void this.handleSaveProject(true);
+          },
+        },
+        {
+          label: t('toolbar.loadDemo'),
+          icon: Icons.sparkles,
+          disabled: this.isGeneratingDemo,
+          onSelect: () => {
+            void this.handleGenerateDemo();
+          },
+        },
+        {
+          label: t('inspector.enginePrefsBtn'),
+          icon: Icons.sliders,
+          separatorBefore: true,
+          onSelect: () => this.openEnginePrefsSheet(),
+        },
+        {
+          label: t('inspector.deckStatsBtn'),
+          icon: Icons.info,
+          onSelect: () => this.openDeckStatsSheet(),
+        },
+        {
+          label: t('toolbar.studioSkins'),
+          icon: Icons.palette,
+          onSelect: () => this.toggleSkinPopover(),
+        },
+        {
+          label: t('toolbar.shortcutsTitle'),
+          icon: Icons.keyboard,
+          separatorBefore: true,
+          onSelect: () => this.openShortcutsHelpModal(),
+        },
+        {
+          label: t('toolbar.commandPaletteTitle'),
+          icon: Icons.command,
+          shortcut: 'Ctrl+K',
+          onSelect: () => this.openCommandPalette(),
+        },
+        {
+          label: t('toolbar.about'),
+          icon: Icons.info,
+          separatorBefore: true,
+          onSelect: () => {
+            void this.openAboutModal();
+          },
+        },
+        {
+          label: t('toolbar.closeSession'),
+          icon: Icons.close,
+          danger: true,
+          separatorBefore: true,
+          disabled: !hasSlides,
+          onSelect: () => this.closeSessionToWelcome(),
+        },
+      ],
+    });
+  }
+
+  private closeStageSettingsPopover(): void {
+    this.isStageSettingsOpen = false;
+    this.stagePopoverScope.clear();
+    const host = this.root.querySelector('#stage-popover-host') as HTMLElement | null;
+    if (host) host.innerHTML = '';
+    this.root.querySelector('#btn-stage-settings')?.classList.remove('active-pane');
+  }
+
+  private toggleStageSettingsPopover(anchorEl?: HTMLElement): void {
+    if (this.isStageSettingsOpen) {
+      this.closeStageSettingsPopover();
+      return;
+    }
+    const host = this.root.querySelector('#stage-popover-host') as HTMLElement | null;
+    if (!host) return;
+    this.isStageSettingsOpen = true;
+    this.root.querySelector('#btn-stage-settings')?.classList.add('active-pane');
+    openStageSettingsPopover({
+      host,
+      scope: this.stagePopoverScope,
+      settings: this.store.getSettings(),
+      sequenceLayoutPref: this.sequenceLayoutPref,
+      anchorEl,
+      onUpdateSettings: (partial) => this.store.updateSettings(partial),
+      onChangeSequenceLayout: (pref) => this.setSequenceLayoutPreference(pref),
+      onClose: () => this.closeStageSettingsPopover(),
+    });
+  }
+
+  private openEnginePrefsSheet(): void {
+    const host = this.root.querySelector('#workspace-modal-host') as HTMLElement | null;
+    openEnginePreferencesModal({
+      host,
+      scope: this.workspaceModalScope,
+      settings: this.store.getSettings(),
+      onUpdateSettings: (partial) => this.store.updateSettings(partial),
+      onClose: () => {},
+    });
+  }
+
+  private openDeckStatsSheet(): void {
+    const host = this.root.querySelector('#workspace-modal-host') as HTMLElement | null;
+    const slides = this.store.getSlides();
+    const diag = this.store.getProjectDiagnostics?.() ?? {
+      slideCount: slides.length,
+      videoTransitionCount: 0,
+      proceduralTransitionCount: 0,
+      notesCount: 0,
+      estimatedDurationSec: 0,
+      totalMediaBytes: 0,
+    };
+    const missing = this.store.getMissingVideoAssets?.() ?? [];
+    openDeckDiagnosticsModal({
+      host,
+      scope: this.workspaceModalScope,
+      diagnostics: diag,
+      missingVideosCount: missing.length,
+      firstMissingFileName: missing[0]?.videoFileName,
+      onRelinkMissing: () => {
+        if (missing[0]) this.triggerRelinkVideo(missing[0].slideIds);
+      },
+      onClose: () => {},
+    });
+  }
+
+  private openSurgicalAiSheet(activeSlide: SlideNode, slideIdx: number, defaultScope: 'slide' | 'transition'): void {
+    const host = this.root.querySelector('#workspace-modal-host') as HTMLElement | null;
+    const totalSlides = this.store.getSlides().length;
+    openSurgicalAiModal({
+      host,
+      scope: this.workspaceModalScope,
+      activeSlide,
+      slideIdx,
+      totalSlides,
+      defaultScope,
+      scopeOverride: this.aiEditScopeOverride,
+      draftInstruction: this.aiEditDraftInstruction,
+      aiMeta: this.store.getProjectAiSourceMeta(),
+      currentVideoTimeSec: this.previewEngine?.getActiveVideoTimeSec?.() ?? null,
+      callbacks: {
+        getAiMeta: () => this.store.getProjectAiSourceMeta(),
+        setAiMeta: (meta) => this.store.setProjectAiSourceMeta(meta),
+        getCurrentVideoTimeSec: () => this.previewEngine?.getActiveVideoTimeSec?.() ?? null,
+        onDraftChange: (draft, scope) => {
+          this.aiEditDraftInstruction = draft;
+          this.aiEditScopeOverride = scope;
+        },
+        onNotifyCopied: () => {
+          this.store.notify(t('notify.aiPromptCopied'), 'success', 2500);
+        },
+      },
+      onClose: () => {},
+    });
+  }
+
+  private closeSessionToWelcome(): void {
+    if (this.store.getSlides().length === 0) return;
+    this.store.clearAllSlides();
+    this.currentProjectFilePath = null;
+    this.syncWindowTitle();
+    void this.refreshRecentSessions();
+  }
+
+  private async refreshRecentSessions(): Promise<void> {
+    this.recentSessions = await listRecentSessions();
+    if (this.store.getSlides().length === 0) {
+      this.renderEmptyOverlay();
+    }
+  }
+
+  private async captureFirstSlideThumbnailDataUrl(): Promise<string | undefined> {
+    try {
+      const firstSlide = this.store.getSlides()[0];
+      const url = firstSlide?.imageAsset?.objectUrl;
+      if (!url || typeof document === 'undefined') return undefined;
+
+      const img = await new Promise<HTMLImageElement | null>((resolve) => {
+        const image = new Image();
+        image.crossOrigin = 'anonymous';
+        const timer = window.setTimeout(() => resolve(null), 1200);
+        image.onload = () => {
+          window.clearTimeout(timer);
+          resolve(image);
+        };
+        image.onerror = () => {
+          window.clearTimeout(timer);
+          resolve(null);
+        };
+        image.src = url;
+      });
+
+      if (!img || !img.naturalWidth || !img.naturalHeight) return undefined;
+      const canvas = document.createElement('canvas');
+      const targetW = 192;
+      const targetH = 108;
+      canvas.width = targetW;
+      canvas.height = targetH;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return undefined;
+
+      ctx.fillStyle = '#09090b';
+      ctx.fillRect(0, 0, targetW, targetH);
+      const scale = Math.max(targetW / img.naturalWidth, targetH / img.naturalHeight);
+      const dw = img.naturalWidth * scale;
+      const dh = img.naturalHeight * scale;
+      ctx.drawImage(img, (targetW - dw) / 2, (targetH - dh) / 2, dw, dh);
+      return canvas.toDataURL('image/jpeg', 0.72);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async recordCurrentProjectAsRecent(
+    filePath: string | null | undefined,
+    fileName?: string | null
+  ): Promise<void> {
+    if (!filePath || !filePath.trim()) return;
+    const project = this.store.getProject();
+    const fallbackName = filePath.split(/[\\/]/).pop() || 'presentation.mpres';
+    const thumb = await this.captureFirstSlideThumbnailDataUrl();
+    this.recentSessions = await recordRecentSession({
+      title: project.title || fallbackName,
+      filePath,
+      fileName: fileName || fallbackName,
+      slideCount: project.slides.length,
+      aspectRatio: project.settings.aspectRatio,
+      ...(thumb ? { thumbnailDataUrl: thumb } : {}),
+    });
+  }
+
+  private async openRecentSessionEntry(entry: RecentSessionEntry): Promise<void> {
+    if (entry.exists === false) {
+      this.store.notify(t('welcome.missingError', { path: entry.filePath }), 'warning', 4500);
+      return;
+    }
+    if (window.desktopAPI?.openProjectByPath) {
+      try {
+        const opened = await window.desktopAPI.openProjectByPath(entry.filePath);
+        await this.openDesktopStreamedProject(opened);
+      } catch (err) {
+        this.store.notify(
+          err instanceof Error ? err.message : t('notify.openProjectError'),
+          'error',
+          4500
+        );
+        void this.refreshRecentSessions();
+      }
+    } else {
+      await this.handleOpenProject();
+    }
+  }
+
+  private async togglePinRecentSessionEntry(entry: RecentSessionEntry): Promise<void> {
+    this.recentSessions = await togglePinRecentSession(entry.filePath);
+    if (this.store.getSlides().length === 0) {
+      this.renderEmptyOverlay();
+    }
+  }
+
+  private async revealRecentSessionEntry(entry: RecentSessionEntry): Promise<void> {
+    const ok = await revealRecentSessionInFolder(entry.filePath);
+    if (!ok) {
+      this.store.notify(t('welcome.missingError', { path: entry.filePath }), 'warning', 3500);
+    }
+  }
+
+  private async removeRecentSessionEntry(entry: RecentSessionEntry): Promise<void> {
+    this.recentSessions = await removeRecentSession(entry.filePath);
+    if (this.store.getSlides().length === 0) {
+      this.renderEmptyOverlay();
+    }
+  }
+
+  private async clearUnpinnedRecentEntries(): Promise<void> {
+    this.recentSessions = await clearUnpinnedRecentSessions();
+    if (this.store.getSlides().length === 0) {
+      this.renderEmptyOverlay();
+    }
+  }
+
   private toggleNavigatorPane(): void {
-    this.isNavigatorVisible = !this.isNavigatorVisible;
-    const navPane = this.root.querySelector('#navigator-pane');
-    navPane?.classList.toggle('collapsed', !this.isNavigatorVisible);
-    const navResizer = this.root.querySelector('#navigator-resizer');
-    navResizer?.classList.toggle('collapsed', !this.isNavigatorVisible);
-    const btn = this.root.querySelector('#btn-toggle-navigator');
-    btn?.classList.toggle('active-pane', this.isNavigatorVisible);
-    this.previewEngine?.resize?.();
+    const nextPref: SequenceLayoutPreference = this.isNavigatorVisible ? 'bottom' : 'side';
+    this.setSequenceLayoutPreference(nextPref);
   }
 
   private toggleInspectorPane(): void {
@@ -938,7 +1534,316 @@ export class MotionPresentationApp {
     inspResizer?.classList.toggle('collapsed', !this.isInspectorVisible);
     const btn = this.root.querySelector('#btn-toggle-inspector');
     btn?.classList.toggle('active-pane', this.isInspectorVisible);
-    this.previewEngine?.resize?.();
+    this.handleViewportResize();
+  }
+
+  private toggleStageOverviewGrid(force?: boolean): void {
+    const next = typeof force === 'boolean' ? force : !this.isStageOverviewOpen;
+    if (this.store.getSlides().length === 0) {
+      this.isStageOverviewOpen = false;
+    } else {
+      this.isStageOverviewOpen = next;
+    }
+    this.renderStageOverviewGrid();
+    this.renderActivityRail();
+  }
+
+  private applySkinSelection(skinId: StudioSkinId): void {
+    selectStudioSkin(skinId);
+    this.renderWindowToolbar();
+    this.renderActivityRail();
+    this.renderInspectorPane();
+    if (this.isSkinPopoverOpen) {
+      this.renderSkinPopover();
+    }
+  }
+
+  private toggleSkinPopover(): void {
+    if (this.isSkinPopoverOpen) {
+      this.closeSkinPopover();
+      return;
+    }
+    this.isSkinPopoverOpen = true;
+    this.renderSkinPopover();
+  }
+
+  private closeSkinPopover(): void {
+    this.isSkinPopoverOpen = false;
+    this.skinPopoverScope.clear();
+    const host = this.root.querySelector('#skin-popover-host') as HTMLElement | null;
+    if (host) host.innerHTML = '';
+  }
+
+  private renderSkinPopover(): void {
+    const host = this.root.querySelector('#skin-popover-host') as HTMLElement | null;
+    if (!host) return;
+    this.skinPopoverScope.clear();
+    const activeSkin = getStudioSkin();
+    const themePref = getThemePreference();
+
+    host.innerHTML = `
+      <div class="skin-popover-backdrop apple-popover-backdrop" id="skin-popover-backdrop">
+        <div class="skin-popover-card apple-skin-popover" id="skin-popover-card" role="dialog" aria-label="${this.escapeHtml(t('skin.popoverTitle'))}">
+          <div class="skin-popover-head">
+            <span>${Icons.palette} <span>${this.escapeHtml(t('skin.popoverTitle'))}</span></span>
+            <button type="button" class="btn btn-icon-only btn-xs" id="btn-close-skin-popover" aria-label="Close">
+              ${Icons.close}
+            </button>
+          </div>
+          <div class="skin-mode-segmented" role="group" aria-label="${this.escapeHtml(t('skin.popoverTitle'))}">
+            <button type="button" class="skin-mode-btn ${themePref === 'system' ? 'active' : ''}" data-pick-theme="system">${escapeHtml(t('skin.modeAuto'))}</button>
+            <button type="button" class="skin-mode-btn ${themePref === 'dark' ? 'active' : ''}" data-pick-theme="dark">${escapeHtml(t('skin.modeDark'))}</button>
+            <button type="button" class="skin-mode-btn ${themePref === 'light' ? 'active' : ''}" data-pick-theme="light">${escapeHtml(t('skin.modeLight'))}</button>
+          </div>
+          <div class="apple-menu-sep" style="margin:2px 0;"></div>
+          <div class="skin-popover-list">
+            ${STUDIO_SKINS.map((sk) => {
+              const active = sk.id === activeSkin;
+              return `
+                <button type="button" class="skin-option-row ${active ? 'active' : ''}" data-pick-skin="${sk.id}">
+                  <span class="skin-swatch-pair">
+                    <span class="skin-swatch-bg" style="background:${sk.swatchBg};"></span>
+                    <span class="skin-swatch-acc" style="background:${sk.swatchAccent};"></span>
+                  </span>
+                  <span class="skin-option-text">
+                    <strong>${this.escapeHtml(sk.name)}</strong>
+                    <span>${this.escapeHtml(sk.tagline)}</span>
+                  </span>
+                  ${active ? `<span class="skin-active-check">${Icons.check}</span>` : ''}
+                </button>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      </div>
+    `;
+
+    const backdrop = host.querySelector('#skin-popover-backdrop');
+    const card = host.querySelector('#skin-popover-card');
+    this.skinPopoverScope.listen(backdrop, 'click', (e) => {
+      if (e.target === backdrop) this.closeSkinPopover();
+    });
+    this.skinPopoverScope.listen(card, 'click', (e) => e.stopPropagation());
+    this.skinPopoverScope.listen(host.querySelector('#btn-close-skin-popover'), 'click', () => {
+      this.closeSkinPopover();
+    });
+    host.querySelectorAll('[data-pick-theme]').forEach((btn) => {
+      this.skinPopoverScope.listen(btn, 'click', () => {
+        const nextPref = (btn as HTMLElement).dataset.pickTheme as ThemePreference | undefined;
+        if (!nextPref) return;
+        setThemePreference(nextPref);
+        this.syncThemeToDesktop(nextPref);
+        this.renderWindowToolbar();
+        this.renderActivityRail();
+        this.renderInspectorPane();
+        this.renderSkinPopover();
+      });
+    });
+    host.querySelectorAll('[data-pick-skin]').forEach((btn) => {
+      this.skinPopoverScope.listen(btn, 'click', () => {
+        const id = (btn as HTMLElement).dataset.pickSkin as StudioSkinId | undefined;
+        if (id) {
+          this.applySkinSelection(id);
+          this.closeSkinPopover();
+        }
+      });
+    });
+    this.skinPopoverScope.listen(window, 'keydown', (ev) => {
+      if ((ev as KeyboardEvent).key === 'Escape') {
+        this.closeSkinPopover();
+      }
+    });
+  }
+
+  private renderActivityRail(): void {
+    const rail = this.root.querySelector('#activity-rail') as HTMLElement | null;
+    if (!rail) return;
+    this.activityRailScope.clear();
+
+    const slides = this.store.getSlides();
+    if (slides.length === 0) {
+      rail.classList.add('hidden');
+      rail.innerHTML = '';
+      return;
+    }
+
+    rail.classList.remove('hidden');
+    rail.innerHTML = `
+      <div class="rail-group">
+        <button
+          type="button"
+          class="rail-btn ${!this.isStageOverviewOpen ? 'active' : ''}"
+          id="rail-btn-stage"
+          title="${this.escapeHtml(t('shell.stageAria'))}"
+          aria-label="${this.escapeHtml(t('shell.stageAria'))}"
+        >
+          ${Icons.layers}
+        </button>
+        <button
+          type="button"
+          class="rail-btn ${this.isStageOverviewOpen ? 'active' : ''}"
+          id="rail-btn-overview"
+          title="${this.escapeHtml(t('presenter.gridAria'))}"
+          aria-label="${this.escapeHtml(t('presenter.gridAria'))}"
+        >
+          ${Icons.grid}
+        </button>
+        <button
+          type="button"
+          class="rail-btn ${this.isNavigatorVisible ? 'active' : ''}"
+          id="rail-btn-nav-drawer"
+          title="${this.escapeHtml(t('toolbar.toggleNavTitle'))}"
+          aria-label="${this.escapeHtml(t('toolbar.toggleNavTitle'))}"
+        >
+          ${isRtlLanguage() ? Icons.sidebarRight : Icons.sidebarLeft}
+        </button>
+      </div>
+      <div class="rail-sep"></div>
+      <div class="rail-group">
+        <button
+          type="button"
+          class="rail-btn"
+          id="rail-btn-add-slide"
+          title="${this.escapeHtml(t('toolbar.addSlideTitle'))}"
+          aria-label="${this.escapeHtml(t('toolbar.addSlideTitle'))}"
+        >
+          ${Icons.photoPlus}
+        </button>
+        <button
+          type="button"
+          class="rail-btn"
+          id="rail-btn-reel-slicer"
+          title="${this.escapeHtml(t('toolbar.reelWorkflowTitle'))}"
+          aria-label="${this.escapeHtml(t('toolbar.reelWorkflowTitle'))}"
+        >
+          ${Icons.splitCue}
+        </button>
+      </div>
+      <div class="rail-spacer"></div>
+      <div class="rail-group">
+        <button
+          type="button"
+          class="rail-btn ${this.isSkinPopoverOpen ? 'active' : ''}"
+          id="rail-btn-skins"
+          title="Studio Skins"
+          aria-label="Studio Skins"
+        >
+          ${Icons.palette}
+        </button>
+        <button
+          type="button"
+          class="rail-btn"
+          id="rail-btn-shortcuts"
+          title="${this.escapeHtml(t('toolbar.shortcutsTitle'))}"
+          aria-label="${this.escapeHtml(t('toolbar.shortcutsTitle'))}"
+        >
+          ${Icons.keyboard}
+        </button>
+      </div>
+    `;
+
+    this.activityRailScope.listen(rail.querySelector('#rail-btn-stage'), 'click', () => {
+      this.toggleStageOverviewGrid(false);
+    });
+    this.activityRailScope.listen(rail.querySelector('#rail-btn-overview'), 'click', () => {
+      this.toggleStageOverviewGrid();
+    });
+    this.activityRailScope.listen(rail.querySelector('#rail-btn-nav-drawer'), 'click', () => {
+      this.toggleNavigatorPane();
+    });
+    this.activityRailScope.listen(rail.querySelector('#rail-btn-add-slide'), 'click', () => {
+      const input = this.root.querySelector('#single-image-input') as HTMLInputElement | null;
+      if (input) {
+        input.dataset.replaceSlideId = '';
+        input.click();
+      }
+    });
+    this.activityRailScope.listen(rail.querySelector('#rail-btn-reel-slicer'), 'click', () => {
+      void this.handleOpenReelWorkflow();
+    });
+    this.activityRailScope.listen(rail.querySelector('#rail-btn-skins'), 'click', () => {
+      this.toggleSkinPopover();
+    });
+    this.activityRailScope.listen(rail.querySelector('#rail-btn-shortcuts'), 'click', () => {
+      this.openShortcutsHelpModal();
+    });
+  }
+
+  private renderStageOverviewGrid(): void {
+    const gridHost = this.root.querySelector('#stage-overview-grid') as HTMLElement | null;
+    const frameEl = this.root.querySelector('#canvas-frame') as HTMLElement | null;
+    if (!gridHost) return;
+    this.overviewGridScope.clear();
+
+    const slides = this.store.getSlides();
+    if (!this.isStageOverviewOpen || slides.length === 0) {
+      gridHost.style.display = 'none';
+      gridHost.innerHTML = '';
+      if (frameEl) frameEl.style.display = '';
+      return;
+    }
+
+    if (frameEl) frameEl.style.display = 'none';
+    gridHost.style.display = 'flex';
+    const activeIdx = this.store.getActivePreviewIndex();
+
+    gridHost.innerHTML = `
+      <div class="overview-grid-header">
+        <div class="overview-grid-title">
+          ${Icons.grid}
+          <span>${this.escapeHtml(t('presenter.gridAria'))}</span>
+          <span class="dock-stat-pill tabular-nums">${slides.length}</span>
+        </div>
+        <button type="button" class="btn btn-xs" id="btn-close-overview-grid">
+          ${Icons.close}
+          <span>${this.escapeHtml(t('nav.clearSelection'))}</span>
+        </button>
+      </div>
+      <div class="overview-bento-cards">
+        ${slides
+          .map((slide, idx) => {
+            const isCurrent = idx === activeIdx;
+            const hasLoop = Boolean(slide.idleLoopAsset);
+            const vid = slide.transitionToNext.videoAsset;
+            const transDur = vid
+              ? `${((vid.durationSec ?? 1) / Math.max(0.25, slide.transitionToNext.playbackSpeed || 1)).toFixed(1)}s`
+              : `${((slide.transitionToNext.fallbackDurationMs || 700) / 1000).toFixed(1)}s`;
+            return `
+              <button type="button" class="overview-bento-card ${isCurrent ? 'active' : ''}" data-ov-slide-id="${this.escapeHtml(slide.id)}">
+                <div class="overview-thumb-box">
+                  ${
+                    slide.imageAsset.objectUrl
+                      ? `<img src="${this.escapeHtml(slide.imageAsset.objectUrl)}" alt="" />`
+                      : `<span class="tabular-nums">${idx + 1}</span>`
+                  }
+                  <div class="overview-badges-top">
+                    <span class="overview-pill tabular-nums">${String(idx + 1).padStart(2, '0')}</span>
+                    ${hasLoop ? `<span class="overview-pill is-loop">Loop</span>` : ''}
+                    ${idx < slides.length - 1 ? `<span class="overview-pill is-trans tabular-nums">${transDur}</span>` : ''}
+                  </div>
+                </div>
+                <div class="overview-card-foot">
+                  <span class="overview-card-title">${this.escapeHtml(slide.title)}</span>
+                </div>
+              </button>
+            `;
+          })
+          .join('')}
+      </div>
+    `;
+
+    this.overviewGridScope.listen(gridHost.querySelector('#btn-close-overview-grid'), 'click', () => {
+      this.toggleStageOverviewGrid(false);
+    });
+    gridHost.querySelectorAll('.overview-bento-card').forEach((card) => {
+      this.overviewGridScope.listen(card, 'click', () => {
+        const slideId = (card as HTMLElement).dataset.ovSlideId;
+        if (slideId) {
+          this.store.setSelection({ type: 'slide', slideId });
+          this.toggleStageOverviewGrid(false);
+        }
+      });
+    });
   }
 
   private syncWindowTitle(): void {
@@ -999,6 +1904,7 @@ export class MotionPresentationApp {
       const data = await this.store.loadOpenedDesktopProject(opened);
       this.currentProjectFilePath = opened.filePath || null;
       this.syncWindowTitle();
+      void this.recordCurrentProjectAsRecent(opened.filePath, opened.fileName);
       if (opened.recoveredFromBackup) {
         this.store.notify(t('notify.projectRestoredFromBackup'), 'warning', 7000);
       } else {
@@ -1029,6 +1935,7 @@ export class MotionPresentationApp {
       await this.store.loadProjectBundle(parsed);
       this.currentProjectFilePath = filePath || null;
       this.syncWindowTitle();
+      void this.recordCurrentProjectAsRecent(filePath, fileName);
       this.store.notify(
         t('notify.openProjectSuccess', { title: parsed.projectData.title }),
         'success'
@@ -1084,6 +1991,7 @@ export class MotionPresentationApp {
         this.currentProjectFilePath = result.filePath;
         this.store.setProjectToken(result.projectToken);
         this.syncWindowTitle();
+        void this.recordCurrentProjectAsRecent(result.filePath, result.fileName);
         this.store.notify(t('notify.saveProjectSuccess', { name: result.fileName }), 'success');
         return;
       }
@@ -1120,6 +2028,7 @@ export class MotionPresentationApp {
         if (!result) return;
         this.currentProjectFilePath = result.filePath;
         this.syncWindowTitle();
+        void this.recordCurrentProjectAsRecent(result.filePath, result.fileName);
         this.store.notify(t('notify.saveProjectSuccess', { name: result.fileName }), 'success');
       } else {
         ProjectSerializer.triggerBundleDownload(project.title, bundleBytes);
@@ -1408,7 +2317,18 @@ export class MotionPresentationApp {
     pane.innerHTML = `
       <div class="pane-subheader">
         <span>${t('nav.sectionHeader')}</span>
-        <span class="tabular-nums">${slides.length}</span>
+        <span style="display:inline-flex;align-items:center;gap:6px;">
+          <span class="tabular-nums">${slides.length}</span>
+          <button
+            type="button"
+            class="btn btn-icon-only btn-nav-switch-bottom"
+            id="btn-nav-to-bottom"
+            title="${this.escapeHtml(t('layout.switchToBottom'))}"
+            aria-label="${this.escapeHtml(t('layout.switchToBottom'))}"
+          >
+            ${Icons.timelineDock}
+          </button>
+        </span>
       </div>
       ${bannerHtml}
       ${filterBarHtml}
@@ -1425,6 +2345,10 @@ export class MotionPresentationApp {
         }
       </div>
     `;
+
+    pane.querySelector('#btn-nav-to-bottom')?.addEventListener('click', () => {
+      this.setSequenceLayoutPreference('bottom');
+    });
 
     const navSearchIn = pane.querySelector('#nav-search-input') as HTMLInputElement | null;
     navSearchIn?.addEventListener('input', () => {
@@ -1842,6 +2766,7 @@ export class MotionPresentationApp {
       hud,
       this.emptyStageScope,
       this.store.getSlides().length,
+      this.recentSessions,
       {
         onImportMedia: () => {
           void this.handleImportMedia();
@@ -1854,6 +2779,21 @@ export class MotionPresentationApp {
         },
         onOpenProject: () => {
           void this.handleOpenProject();
+        },
+        onOpenRecentSession: (entry) => {
+          void this.openRecentSessionEntry(entry);
+        },
+        onTogglePinRecentSession: (entry) => {
+          void this.togglePinRecentSessionEntry(entry);
+        },
+        onRevealRecentSession: (entry) => {
+          void this.revealRecentSessionEntry(entry);
+        },
+        onRemoveRecentSession: (entry) => {
+          void this.removeRecentSessionEntry(entry);
+        },
+        onClearUnpinnedRecents: () => {
+          void this.clearUnpinnedRecentEntries();
         },
       }
     );
@@ -1924,13 +2864,11 @@ export class MotionPresentationApp {
    * 4. TRAILING PANE: INSPECTOR WITH MACOS SEGMENTED CONTROL
    * ========================================================================= */
   private renderInspectorPane(): void {
-    this.disposeActiveSplitSession();
-    this.inspectorAiScope.clear();
-
     const pane = this.root.querySelector('#inspector-pane') as HTMLElement;
     if (!pane) return;
 
     pane.classList.toggle('collapsed', !this.isInspectorVisible);
+    pane.classList.toggle('is-overlay-drawer', this.isInspectorOverlayMode && this.isInspectorVisible);
 
     const selection = this.store.getSelection();
     const slides = this.store.getSlides();
@@ -1954,10 +2892,11 @@ export class MotionPresentationApp {
 
     if (activeSegment === 'slide' && activeSlide) {
       const slideIdx = slides.findIndex((s) => s.id === activeSlide.id);
+      const hasLoop = Boolean(activeSlide.idleLoopAsset);
       contentHtml = `
         <div class="inspector-group">
           <div class="inspector-group-title">
-            <span>${t('inspector.slideHeader', { num: slideIdx + 1 })}</span>
+            <span>${t('inspector.basicsSection')} · ${t('inspector.slideHeader', { num: slideIdx + 1 })}</span>
             <span class="tabular-nums">${activeSlide.imageAsset.width}×${activeSlide.imageAsset.height}</span>
           </div>
 
@@ -1973,40 +2912,14 @@ export class MotionPresentationApp {
 
           <div class="prop-row">
             <span class="prop-label">${t('inspector.imageFileLabel')}</span>
-            <div class="prop-subtext" style="word-break: break-all;">
-              <bdi dir="ltr">${this.escapeHtml(activeSlide.imageAsset.name)}</bdi> (${(activeSlide.imageAsset.fileSize / 1024).toFixed(0)} KB)
-            </div>
-            <button class="btn" id="btn-replace-slide-img" style="margin-top: 4px; width: 100%;">
-              ${t('inspector.replaceImage')}
-            </button>
-          </div>
-
-          <div class="prop-row" style="margin-bottom: 0; padding-top: 6px; border-top: 1px solid var(--border-subtle);">
-            <span class="prop-label">${t('inspector.idleLoopSection')}</span>
-            <div class="prop-subtext" style="word-break: break-all;">
-              ${
-                activeSlide.idleLoopAsset
-                  ? `<bdi dir="ltr">${this.escapeHtml(activeSlide.idleLoopAsset.name)}</bdi> (${activeSlide.idleLoopAsset.durationSec.toFixed(1)}s)`
-                  : t('inspector.idleLoopNone')
-              }
-            </div>
-            <div style="display: flex; gap: 6px; margin-top: 4px;">
-              <button class="btn" id="btn-assign-idle-loop" style="flex: 1;">
-                ${Icons.replay}
-                <span>${activeSlide.idleLoopAsset ? t('inspector.idleLoopReplace') : t('inspector.idleLoopAssign')}</span>
+            <div class="inspector-file-row">
+              <span class="prop-subtext inspector-file-name" title="${this.escapeHtml(activeSlide.imageAsset.name)}">
+                <bdi dir="ltr">${this.escapeHtml(activeSlide.imageAsset.name)}</bdi>
+              </span>
+              <button type="button" class="btn btn-xs" id="btn-replace-slide-img">
+                ${t('inspector.replaceImage')}
               </button>
-              ${
-                activeSlide.idleLoopAsset
-                  ? `<button class="btn btn-destructive" id="btn-remove-idle-loop" title="${this.escapeHtml(t('inspector.idleLoopRemove'))}">${Icons.trash}<span>${t('inspector.idleLoopRemove')}</span></button>`
-                  : ''
-              }
             </div>
-          </div>
-        </div>
-
-        <div class="inspector-group">
-          <div class="inspector-group-title">
-            <span>${t('inspector.timingSection')}</span>
           </div>
 
           <div class="prop-row">
@@ -2026,35 +2939,45 @@ export class MotionPresentationApp {
               placeholder="${this.escapeHtml(t('inspector.autoAdvancePlaceholder'))}"
               value="${activeSlide.holdDurationSec ?? ''}"
             />
-            <span class="prop-subtext">${t('inspector.autoAdvanceHint')}</span>
-          </div>
-        </div>
-
-        <div class="inspector-group">
-          <div class="inspector-group-title">
-            <span>${t('inspector.notesSection')}</span>
-            ${Icons.notes}
           </div>
 
           <div class="prop-row" style="margin-bottom: 0;">
-            <label class="prop-label" for="insp-slide-notes">${t('inspector.notesLabel')}</label>
+            <label class="prop-label" for="insp-slide-notes">
+              <span>${t('inspector.notesSection')}</span>
+              ${Icons.notes}
+            </label>
             <textarea
               class="textarea-field"
               id="insp-slide-notes"
-              rows="4"
+              rows="3"
               placeholder="${this.escapeHtml(t('inspector.notesPlaceholder'))}"
             >${this.escapeHtml(activeSlide.notes || '')}</textarea>
           </div>
         </div>
 
-        ${this.renderSurgicalAiPromptGroup(activeSlide, slideIdx, slides.length, 'slide')}
-
         <div class="inspector-group">
-          <button class="btn" id="btn-insp-duplicate-slide" style="width: 100%; margin-bottom: 6px;">
+          <div class="inspector-group-title">
+            <span>${t('inspector.advancedToolsSection')}</span>
+          </div>
+          <div class="inspector-tools-stack">
+            <button type="button" class="btn inspector-tool-btn" id="btn-open-idle-loop-modal">
+              ${Icons.replay}
+              <span>${t('inspector.idleLoopBtn')}</span>
+              <span class="inspector-tool-badge ${hasLoop ? 'is-active' : ''}">${hasLoop ? t('inspector.idleLoopActive') : t('inspector.idleLoopOff')}</span>
+            </button>
+            <button type="button" class="btn inspector-tool-btn" id="btn-open-ai-edit-modal">
+              ${Icons.sparkles}
+              <span>${t('inspector.aiEditModalBtn')}</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="inspector-tools-row">
+          <button type="button" class="btn" id="btn-insp-duplicate-slide">
             ${Icons.duplicate}
             <span>${t('inspector.duplicateSlide')}</span>
           </button>
-          <button class="btn btn-destructive" id="btn-insp-delete-slide" style="width: 100%;">
+          <button type="button" class="btn btn-destructive" id="btn-insp-delete-slide">
             ${Icons.trash}
             <span>${t('inspector.deleteSlide')}</span>
           </button>
@@ -2068,25 +2991,11 @@ export class MotionPresentationApp {
           : settings.loopPresentation && slides.length > 1
             ? 0
             : -1;
-      const nextSlide = nextIdx !== -1 ? slides[nextIdx] : null;
       const spec = activeSlide.transitionToNext;
       const vid = spec.videoAsset;
-      const hasSlice =
-        typeof spec.startTimeSec === 'number' || typeof spec.endTimeSec === 'number';
       const segStart = vid ? Math.max(0, spec.startTimeSec ?? 0) : 0;
       const segEnd = vid ? Math.max(segStart, spec.endTimeSec ?? vid.durationSec) : 0;
       const segDur = vid ? Math.max(0, segEnd - segStart) : 0;
-      const canSplit = Boolean(vid && segDur >= 0.18);
-      const midTime = Number(((segStart + segEnd) / 2).toFixed(2));
-      const startFrameUrl =
-        hasSlice && activeSlide.imageAsset
-          ? activeSlide.imageAsset.thumbnailUrl || activeSlide.imageAsset.objectUrl
-          : vid?.thumbnailUrl || '';
-      const endFrameUrl =
-        hasSlice && nextSlide
-          ? nextSlide.imageAsset.thumbnailUrl || nextSlide.imageAsset.objectUrl
-          : vid?.lastFrameUrl || vid?.thumbnailUrl || '';
-      const slideReelContext = vid ? this.store.getReelContextForSlide?.(activeSlide.id) : null;
 
       contentHtml = `
         <div class="inspector-group">
@@ -2110,121 +3019,17 @@ export class MotionPresentationApp {
           ${
             vid
               ? `
-            <div class="inspector-filmstrip-box">
-              <div class="inspector-frame-pair">
-                <div class="inspector-frame-cell">
-                  <img src="${startFrameUrl}" alt="${this.escapeHtml(t('inspector.startFrameAlt'))}" />
-                  <span>${hasSlice ? t('inspector.startFrameSlice', { time: segStart.toFixed(2) }) : t('inspector.startFrameVideo')}</span>
-                </div>
-                <div style="text-align: center; color: var(--label-secondary);">${isRtlLanguage() ? Icons.arrowLeft : Icons.arrowRight}</div>
-                <div class="inspector-frame-cell">
-                  <img src="${endFrameUrl}" alt="${this.escapeHtml(t('inspector.endFrameAlt'))}" />
-                  <span>${hasSlice ? t('inspector.endFrameSlice', { time: segEnd.toFixed(2) }) : t('inspector.endFrameVideo')}</span>
-                </div>
-              </div>
-              <div class="prop-subtext" style="word-break: break-all;">
-                ${this.escapeHtml(vid.name)} (${vid.width}×${vid.height})
+            <div class="inspector-video-compact">
+              <img src="${vid.thumbnailUrl || ''}" alt="${this.escapeHtml(t('inspector.startFrameAlt'))}" />
+              <div class="inspector-video-compact-meta">
+                <span class="inspector-file-name" title="${this.escapeHtml(vid.name)}"><bdi dir="ltr">${this.escapeHtml(vid.name)}</bdi></span>
+                <span class="prop-subtext tabular-nums">${vid.width}×${vid.height} · ${segStart.toFixed(1)}s–${segEnd.toFixed(1)}s</span>
               </div>
             </div>
-
-            ${
-              slideReelContext
-                ? `
-              <div class="inspector-reel-pill-box">
-                <span class="prop-subtext" style="color:var(--label-primary);">
-                  ${t('inspector.reelSliceNotice', { count: this.formatArabicSlideCount(slideReelContext.cuePointsSec.length) })}
-                </span>
-                <button class="btn btn-xs" id="btn-insp-edit-reel-cues" style="width:100%;">
-                  ${Icons.sliders}
-                  <span>${t('inspector.editReelCues')}</span>
-                </button>
-              </div>
-            `
-                : ''
-            }
-
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
-              <button class="btn" id="btn-replace-trans-video">${t('inspector.replaceTransVideo')}</button>
-              <button class="btn btn-destructive" id="btn-remove-trans-video">${t('inspector.removeTransVideo')}</button>
+            <div class="inspector-tools-row" style="margin-bottom: 8px;">
+              <button type="button" class="btn btn-xs" id="btn-replace-trans-video">${t('inspector.replaceTransVideo')}</button>
+              <button type="button" class="btn btn-xs btn-destructive" id="btn-remove-trans-video">${t('inspector.removeTransVideo')}</button>
             </div>
-
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px;">
-              <div class="prop-row" style="margin-bottom: 0;">
-                <label class="prop-label" for="insp-trans-start">${t('inspector.sliceStartLabel')}</label>
-                <input
-                  type="number"
-                  min="0"
-                  max="${vid.durationSec.toFixed(2)}"
-                  step="0.05"
-                  class="input-field tabular-nums"
-                  id="insp-trans-start"
-                  value="${segStart.toFixed(2)}"
-                />
-              </div>
-              <div class="prop-row" style="margin-bottom: 0;">
-                <label class="prop-label" for="insp-trans-end">${t('inspector.sliceEndLabel')}</label>
-                <input
-                  type="number"
-                  min="0"
-                  max="${vid.durationSec.toFixed(2)}"
-                  step="0.05"
-                  class="input-field tabular-nums"
-                  id="insp-trans-end"
-                  value="${segEnd.toFixed(2)}"
-                />
-              </div>
-            </div>
-
-            <button class="btn" id="btn-open-split-popover" style="width: 100%; margin-top: 6px;" ${!canSplit ? 'disabled' : ''} title="${this.escapeHtml(t('inspector.splitPopoverBtnTitle'))}">
-              ${Icons.splitCue}
-              <span>${t('inspector.splitPopoverBtn')}</span>
-            </button>
-
-            <div class="split-popover-card" id="split-popover-card" style="display:none;">
-              <div class="prop-label">
-                <span>${t('inspector.splitPopoverHeading')}</span>
-                <span class="tabular-nums" id="split-time-readout" style="color:var(--signal-film);">${midTime.toFixed(2)}s</span>
-              </div>
-              <div class="split-preview-frame">
-                <img id="split-preview-img" src="${startFrameUrl}" alt="${this.escapeHtml(t('inspector.splitPreviewAlt'))}" />
-              </div>
-              <div class="split-scrubber-row">
-                <span class="prop-subtext tabular-nums">${(segStart + 0.08).toFixed(2)}s</span>
-                <input
-                  type="range"
-                  id="split-time-range"
-                  min="${(segStart + 0.08).toFixed(2)}"
-                  max="${Math.max(segStart + 0.09, segEnd - 0.08).toFixed(2)}"
-                  step="0.02"
-                  value="${midTime}"
-                />
-                <span class="prop-subtext tabular-nums">${Math.max(segStart + 0.09, segEnd - 0.08).toFixed(2)}s</span>
-              </div>
-              <div style="display:flex; gap:6px; align-items:center;">
-                <input
-                  type="number"
-                  class="input-field tabular-nums"
-                  id="split-time-num"
-                  min="${(segStart + 0.08).toFixed(2)}"
-                  max="${Math.max(segStart + 0.09, segEnd - 0.08).toFixed(2)}"
-                  step="0.02"
-                  value="${midTime.toFixed(2)}"
-                  style="width:92px;"
-                />
-                <button class="btn btn-xs" id="btn-split-use-stage-time" style="flex:1;" title="${this.escapeHtml(t('inspector.splitUseStageTimeTitle'))}">
-                  ${t('inspector.splitUseStageTime')}
-                </button>
-              </div>
-              <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px;">
-                <button class="btn btn-xs" id="btn-cancel-split-popover">${t('inspector.cancel')}</button>
-                <button class="btn btn-xs btn-prominent" id="btn-confirm-split-transition">${t('inspector.splitConfirm')}</button>
-              </div>
-            </div>
-
-            <button class="btn" id="btn-extract-end-frame" style="width: 100%; margin-top: 6px;" title="${this.escapeHtml(t('inspector.extractEndTitle'))}">
-              ${Icons.extractFrame}
-              <span>${hasSlice ? t('inspector.extractEndSlice') : t('inspector.extractEndVideo')}</span>
-            </button>
           `
               : `
             ${
@@ -2236,35 +3041,20 @@ export class MotionPresentationApp {
                   <span>${t('inspector.missingVideoBadge')}</span>
                 </span>
                 <span class="prop-subtext">${this.escapeHtml(spec.expectedVideoFileName)}</span>
-                <button class="btn btn-prominent" id="btn-insp-relink-video" style="width:100%;">
+                <button type="button" class="btn btn-prominent" id="btn-insp-relink-video" style="width:100%;">
                   ${Icons.relink}
                   <span>${t('inspector.relinkVideoBtn')}</span>
                 </button>
               </div>
             `
-                : `
-              <div class="prop-subtext">
-                ${t('inspector.noVideoHint')}
-              </div>
-            `
+                : `<div class="prop-subtext" style="margin-bottom: 6px;">${t('inspector.noVideoHint')}</div>`
             }
-            <button class="btn ${spec.expectedVideoFileName ? '' : 'btn-prominent'}" id="btn-replace-trans-video" style="width: 100%;">
+            <button type="button" class="btn ${spec.expectedVideoFileName ? '' : 'btn-prominent'}" id="btn-replace-trans-video" style="width: 100%; margin-bottom: 8px;">
               ${Icons.filmTransition}
               <span>${t('inspector.linkVideoBtn')}</span>
             </button>
           `
           }
-
-          <button class="btn" id="btn-generate-trans-video" style="width: 100%; margin-top: 4px;" title="${this.escapeHtml(t('inspector.generateTransTitle'))}">
-            ${Icons.sparkles}
-            <span>${t('inspector.generateTransBtn')}</span>
-          </button>
-        </div>
-
-        <div class="inspector-group">
-          <div class="inspector-group-title">
-            <span>${t('inspector.speedFallbackSection')}</span>
-          </div>
 
           <div class="prop-row">
             <label class="prop-label" for="insp-trans-speed">
@@ -2283,9 +3073,15 @@ export class MotionPresentationApp {
             </div>
           </div>
 
-          <div class="prop-row-inline">
+          <div class="prop-row-inline" style="margin-bottom: 0;">
             <label class="prop-label" for="insp-trans-muted" style="cursor: pointer;">${t('inspector.muteTransAudio')}</label>
             <input type="checkbox" id="insp-trans-muted" ${spec.muted ? 'checked' : ''} />
+          </div>
+        </div>
+
+        <div class="inspector-group">
+          <div class="inspector-group-title">
+            <span>${t('inspector.speedFallbackSection')}</span>
           </div>
 
           <div class="prop-row">
@@ -2325,92 +3121,81 @@ export class MotionPresentationApp {
             </div>
           </div>
 
-          <button class="btn" id="btn-apply-trans-all" style="width: 100%; margin-top: 8px;" title="${this.escapeHtml(t('inspector.applyAllTransTitle'))}">
+          <button type="button" class="btn" id="btn-apply-trans-all" style="width: 100%; margin-top: 8px;" title="${this.escapeHtml(t('inspector.applyAllTransTitle'))}">
             ${Icons.checkAll}
             <span>${t('inspector.applyAllTrans')}</span>
           </button>
         </div>
 
-        ${this.renderSurgicalAiPromptGroup(activeSlide, slideIdx, slides.length, 'transition')}
+        <div class="inspector-group">
+          <div class="inspector-group-title">
+            <span>${t('inspector.advancedToolsSection')}</span>
+          </div>
+          <div class="inspector-tools-stack">
+            ${
+              vid
+                ? `<button type="button" class="btn inspector-tool-btn" id="btn-open-trim-split-modal">
+                    ${Icons.splitCue}
+                    <span>${t('inspector.trimSplitBtn')}</span>
+                  </button>`
+                : ''
+            }
+            <button type="button" class="btn inspector-tool-btn" id="btn-generate-trans-video" title="${this.escapeHtml(t('inspector.generateTransTitle'))}">
+              ${Icons.sparkles}
+              <span>${t('inspector.generateTransBtn')}</span>
+            </button>
+            <button type="button" class="btn inspector-tool-btn" id="btn-open-ai-edit-modal">
+              ${Icons.wand}
+              <span>${t('inspector.aiEditModalBtn')}</span>
+            </button>
+          </div>
+        </div>
       `;
     } else {
+      const currentSkin = getStudioSkin();
       contentHtml = `
         <div class="inspector-group">
           <div class="inspector-group-title">
-            <span>${t('settings.behaviorSection')}</span>
+            <span>${t('inspector.stageQuickSection')}</span>
           </div>
 
-          <div class="prop-row">
-            <label class="prop-label" for="set-interrupt-behavior">${t('settings.interruptLabel')}</label>
-            <select class="select-field" id="set-interrupt-behavior">
-              <option value="skip" ${settings.interruptBehavior === 'skip' ? 'selected' : ''}>${t('settings.interruptSkip')}</option>
-              <option value="lock" ${settings.interruptBehavior === 'lock' ? 'selected' : ''}>${t('settings.interruptLock')}</option>
-              <option value="fast-forward" ${settings.interruptBehavior === 'fast-forward' ? 'selected' : ''}>${t('settings.interruptFF')}</option>
-            </select>
-          </div>
-
-          <div class="prop-row">
-            <label class="prop-label" for="set-backward-behavior">${t('settings.backwardLabel')}</label>
-            <select class="select-field" id="set-backward-behavior">
-              <option value="reverse-step" ${settings.backwardBehavior === 'reverse-step' ? 'selected' : ''}>${t('settings.backwardReverse')}</option>
-              <option value="crossfade" ${settings.backwardBehavior === 'crossfade' ? 'selected' : ''}>${t('settings.backwardCrossfade')}</option>
-              <option value="instant" ${settings.backwardBehavior === 'instant' ? 'selected' : ''}>${t('settings.backwardInstant')}</option>
-            </select>
-          </div>
-
-          <div class="prop-row">
-            <label class="prop-label" for="set-global-speed">
-              <span>${t('settings.globalSpeedLabel')}</span>
-              <span class="tabular-nums" id="lbl-global-speed">${settings.globalPlaybackSpeed.toFixed(2)}×</span>
-            </label>
-            <div class="slider-control-row">
-              <input
-                type="range"
-                id="set-global-speed"
-                min="0.5"
-                max="2.0"
-                step="0.05"
-                value="${settings.globalPlaybackSpeed}"
-              />
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+            <div class="prop-row">
+              <label class="prop-label" for="set-aspect-ratio">${t('settings.aspectRatioLabel')}</label>
+              <select class="select-field" id="set-aspect-ratio">
+                <option value="16:9" ${settings.aspectRatio === '16:9' ? 'selected' : ''}>16:9</option>
+                <option value="16:10" ${settings.aspectRatio === '16:10' ? 'selected' : ''}>16:10</option>
+                <option value="4:3" ${settings.aspectRatio === '4:3' ? 'selected' : ''}>4:3</option>
+                <option value="9:16" ${settings.aspectRatio === '9:16' ? 'selected' : ''}>9:16</option>
+              </select>
+            </div>
+            <div class="prop-row">
+              <label class="prop-label" for="set-fit-mode">${t('settings.fitModeLabel')}</label>
+              <select class="select-field" id="set-fit-mode">
+                <option value="contain" ${settings.fitMode === 'contain' ? 'selected' : ''}>${t('settings.fitContain')}</option>
+                <option value="cover" ${settings.fitMode === 'cover' ? 'selected' : ''}>${t('settings.fitCover')}</option>
+              </select>
             </div>
           </div>
 
-          <div class="prop-row-inline">
-            <label class="prop-label" for="set-loop" style="cursor: pointer;">${t('settings.loopLabel')}</label>
-            <input type="checkbox" id="set-loop" ${settings.loopPresentation ? 'checked' : ''} />
-          </div>
-        </div>
-
-        <div class="inspector-group">
-          <div class="inspector-group-title">
-            <span>${t('settings.displayAudioSection')}</span>
+          <div class="prop-row">
+            <label class="prop-label" for="set-stage-bg">${t('settings.stageBgLabel')}</label>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <input type="color" id="set-stage-bg" value="${settings.stageBackground || '#05070B'}" style="width: 34px; height: 26px; padding: 0; border: none; background: transparent; cursor: pointer;" />
+              <input type="text" id="set-stage-bg-text" class="input-field tabular-nums" value="${settings.stageBackground || '#05070B'}" style="flex: 1;" />
+            </div>
           </div>
 
           <div class="prop-row">
-            <label class="prop-label" for="set-aspect-ratio">${t('settings.aspectRatioLabel')}</label>
-            <select class="select-field" id="set-aspect-ratio">
-              <option value="16:9" ${settings.aspectRatio === '16:9' ? 'selected' : ''}>${t('settings.aspect169')}</option>
-              <option value="16:10" ${settings.aspectRatio === '16:10' ? 'selected' : ''}>${t('settings.aspect1610')}</option>
-              <option value="4:3" ${settings.aspectRatio === '4:3' ? 'selected' : ''}>${t('settings.aspect43')}</option>
-              <option value="9:16" ${settings.aspectRatio === '9:16' ? 'selected' : ''}>${t('settings.aspect916')}</option>
-            </select>
-          </div>
-
-          <div class="prop-row">
-            <label class="prop-label" for="set-fit-mode">${t('settings.fitModeLabel')}</label>
-            <select class="select-field" id="set-fit-mode">
-              <option value="contain" ${settings.fitMode === 'contain' ? 'selected' : ''}>${t('settings.fitContain')}</option>
-              <option value="cover" ${settings.fitMode === 'cover' ? 'selected' : ''}>${t('settings.fitCover')}</option>
-            </select>
-          </div>
-
-          <div class="prop-row">
-            <label class="prop-label" for="set-hud">${t('settings.hudLabel')}</label>
-            <select class="select-field" id="set-hud">
-              <option value="minimal" ${settings.showPresenterHud === 'minimal' ? 'selected' : ''}>${t('settings.hudMinimal')}</option>
-              <option value="progress-bar" ${settings.showPresenterHud === 'progress-bar' ? 'selected' : ''}>${t('settings.hudProgress')}</option>
-              <option value="hidden" ${settings.showPresenterHud === 'hidden' ? 'selected' : ''}>${t('settings.hudHidden')}</option>
-            </select>
+            <span class="prop-label">${this.escapeHtml(t('settings.stageSwatchesLabel'))}</span>
+            <div class="stage-color-swatches" role="group" aria-label="${this.escapeHtml(t('settings.stageSwatchesLabel'))}">
+              ${STAGE_COLOR_SWATCHES.map((sw) => {
+                const active = (settings.stageBackground || '#05070B').toUpperCase() === sw.hex.toUpperCase();
+                const label = t(sw.labelKey);
+                const isLightSwatch = sw.id === 'paper' || sw.id === 'daylight';
+                return `<button type="button" class="stage-swatch-btn ${active ? 'active' : ''}" data-stage-hex="${sw.hex}" data-light-swatch="${isLightSwatch ? 'true' : 'false'}" title="${this.escapeHtml(label)}" aria-label="${this.escapeHtml(label)}" aria-pressed="${active ? 'true' : 'false'}" style="background:${sw.hex};"></button>`;
+              }).join('')}
+            </div>
           </div>
 
           <div class="prop-row">
@@ -2435,114 +3220,39 @@ export class MotionPresentationApp {
             <input type="checkbox" id="set-master-muted" ${settings.masterMuted ? 'checked' : ''} />
           </div>
 
-          <div class="prop-row">
-            <label class="prop-label" for="set-stage-bg">${t('settings.stageBgLabel')}</label>
-            <div style="display: flex; gap: 8px; align-items: center;">
-              <input type="color" id="set-stage-bg" value="${settings.stageBackground || '#05070B'}" style="width: 38px; height: 28px; padding: 0; border: none; background: transparent; cursor: pointer;" />
-              <input type="text" id="set-stage-bg-text" class="input-field tabular-nums" value="${settings.stageBackground || '#05070B'}" style="flex: 1;" />
-            </div>
-          </div>
-          <div class="prop-row">
-            <span class="prop-label">${this.escapeHtml(t('settings.stageSwatchesLabel'))}</span>
-            <div class="stage-color-swatches" role="group" aria-label="${this.escapeHtml(t('settings.stageSwatchesLabel'))}">
-              ${STAGE_COLOR_SWATCHES.map((sw) => {
-                const active = (settings.stageBackground || '#05070B').toUpperCase() === sw.hex.toUpperCase();
-                const label = t(sw.labelKey);
-                const isLightSwatch = sw.id === 'paper' || sw.id === 'daylight';
-                return `<button type="button" class="stage-swatch-btn ${active ? 'active' : ''}" data-stage-hex="${sw.hex}" data-light-swatch="${isLightSwatch ? 'true' : 'false'}" title="${this.escapeHtml(label)}" aria-label="${this.escapeHtml(label)}" aria-pressed="${active ? 'true' : 'false'}" style="background:${sw.hex};"></button>`;
-              }).join('')}
-            </div>
-          </div>
-
-          <div class="prop-row">
-            <label class="prop-label" for="set-preload-strategy">${t('settings.preloadLabel')}</label>
-            <select class="select-field" id="set-preload-strategy">
-              <option value="all" ${settings.preloadStrategy === 'all' ? 'selected' : ''}>${t('settings.preloadAll')}</option>
-              <option value="adjacent" ${settings.preloadStrategy === 'adjacent' ? 'selected' : ''}>${t('settings.preloadAdjacent')}</option>
-            </select>
-          </div>
-
-          <div class="prop-row-inline">
-            <label class="prop-label" for="set-autohide-cursor" style="cursor: pointer;">${t('settings.autohideCursorLabel')}</label>
-            <input type="checkbox" id="set-autohide-cursor" ${settings.autoHideCursor ? 'checked' : ''} />
-          </div>
-
-          <div class="prop-row">
-            <label class="prop-label" for="set-default-fallback-style">${t('settings.defaultFallbackLabel')}</label>
-            <select class="select-field" id="set-default-fallback-style">
-              <option value="crossfade" ${settings.defaultFallbackStyle === 'crossfade' ? 'selected' : ''}>${t('fallback.full.crossfade')}</option>
-              <option value="zoom-morph" ${settings.defaultFallbackStyle === 'zoom-morph' ? 'selected' : ''}>${t('fallback.full.zoom-morph')}</option>
-              <option value="slide-push" ${settings.defaultFallbackStyle === 'slide-push' ? 'selected' : ''}>${t('fallback.full.slide-push')}</option>
-              <option value="wipe-reveal" ${settings.defaultFallbackStyle === 'wipe-reveal' ? 'selected' : ''}>${t('fallback.full.wipe-reveal')}</option>
-              <option value="iris-spotlight" ${settings.defaultFallbackStyle === 'iris-spotlight' ? 'selected' : ''}>${t('fallback.full.iris-spotlight')}</option>
-              <option value="cut" ${settings.defaultFallbackStyle === 'cut' ? 'selected' : ''}>${t('fallback.full.cut')}</option>
-            </select>
-          </div>
-
-          <div class="prop-row">
-            <label class="prop-label" for="set-default-fallback-dur">${t('settings.defaultFallbackDurLabel')}</label>
-            <input type="number" id="set-default-fallback-dur" class="input-field tabular-nums" min="100" max="3000" step="50" value="${settings.defaultFallbackDurationMs}" />
+          <div class="prop-row-inline" style="margin-bottom: 0;">
+            <label class="prop-label" for="set-loop" style="cursor: pointer;">${t('settings.loopLabel')}</label>
+            <input type="checkbox" id="set-loop" ${settings.loopPresentation ? 'checked' : ''} />
           </div>
         </div>
 
-        ${(() => {
-          const diag = this.store.getProjectDiagnostics?.() ?? {
-            slideCount: slides.length,
-            videoTransitionCount: 0,
-            proceduralTransitionCount: 0,
-            notesCount: 0,
-            estimatedDurationSec: 0,
-            totalMediaBytes: 0,
-          };
-          const mins = Math.floor(diag.estimatedDurationSec / 60);
-          const secs = diag.estimatedDurationSec % 60;
-          const durText = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-          const mbText =
-            diag.totalMediaBytes >= 1024 * 1024
-              ? `${(diag.totalMediaBytes / (1024 * 1024)).toFixed(1)} MB`
-              : `${Math.round(diag.totalMediaBytes / 1024)} KB`;
-          return `
-        <div class="inspector-group" id="insp-deck-diagnostics">
+        <div class="inspector-group">
           <div class="inspector-group-title">
-            <span>${t('settings.statsSection')}</span>
-            <span class="tabular-nums">${durText}</span>
+            <span>${t('inspector.advancedToolsSection')}</span>
           </div>
-          <div class="diagnostics-grid">
-            <div class="stat-card">
-              <span class="stat-value tabular-nums">${diag.slideCount}</span>
-              <span class="stat-label">${t('settings.statTotalSlides')}</span>
-            </div>
-            <div class="stat-card">
-              <span class="stat-value tabular-nums">${diag.videoTransitionCount}</span>
-              <span class="stat-label">${t('settings.statVideoTrans')}</span>
-            </div>
-            <div class="stat-card">
-              <span class="stat-value tabular-nums">${diag.proceduralTransitionCount}</span>
-              <span class="stat-label">${t('settings.statCssTrans')}</span>
-            </div>
-            <div class="stat-card">
-              <span class="stat-value tabular-nums">${diag.notesCount}</span>
-              <span class="stat-label">${t('settings.statWithNotes')}</span>
-            </div>
-            <div class="stat-card">
-              <span class="stat-value tabular-nums">${durText}</span>
-              <span class="stat-label">${t('settings.statEstDuration')}</span>
-            </div>
-            <div class="stat-card">
-              <span class="stat-value tabular-nums">${mbText}</span>
-              <span class="stat-label">${t('settings.statMediaSize')}</span>
-            </div>
+          <div class="inspector-tools-stack">
+            <button type="button" class="btn inspector-tool-btn" id="btn-open-engine-prefs-modal">
+              ${Icons.sliders}
+              <span>${t('inspector.enginePrefsBtn')}</span>
+            </button>
+            <button type="button" class="btn inspector-tool-btn" id="btn-open-deck-stats-modal">
+              ${Icons.info}
+              <span>${t('inspector.deckStatsBtn')}</span>
+            </button>
+            <button type="button" class="btn inspector-tool-btn" id="btn-open-skins-from-insp">
+              ${Icons.palette}
+              <span>${t('inspector.skinBtn')}</span>
+              <span class="inspector-tool-badge">${this.escapeHtml(currentSkin)}</span>
+            </button>
           </div>
         </div>
-          `;
-        })()}
       `;
     }
 
     // Equal-width noun-only Segmented Control per segmented-controls.md › Content
     pane.innerHTML = `
       <div class="segmented-control-wrap">
-        <div class="segmented-control" role="tablist" aria-label="${this.escapeHtml(t('inspector.tabsAria'))}">
+        <div class="segmented-control" role="tablist" aria-label="${this.escapeHtml(t('inspector.tabsAria'))}" style="flex: 1;">
           <button
             class="segment-btn ${activeSegment === 'slide' ? 'active' : ''}"
             data-tab="slide"
@@ -2570,11 +3280,20 @@ export class MotionPresentationApp {
             ${t('inspector.tabSettings')}
           </button>
         </div>
+        ${
+          this.isInspectorOverlayMode
+            ? `<button type="button" class="btn btn-icon-only" id="btn-close-floating-inspector" title="${this.escapeHtml(t('inspector.closeFloating'))}" aria-label="${this.escapeHtml(t('inspector.closeFloating'))}">${Icons.close}</button>`
+            : ''
+        }
       </div>
       <div class="inspector-scroll">
         ${contentHtml}
       </div>
     `;
+
+    pane.querySelector('#btn-close-floating-inspector')?.addEventListener('click', () => {
+      this.toggleInspectorPane();
+    });
 
     pane.querySelectorAll('.segment-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -2588,6 +3307,7 @@ export class MotionPresentationApp {
     });
 
     if (activeSegment === 'slide' && activeSlide) {
+      const slideIdx = slides.findIndex((s) => s.id === activeSlide.id);
       const titleIn = pane.querySelector('#insp-slide-title') as HTMLInputElement;
       titleIn?.addEventListener('change', () => {
         this.store.updateSlideDetails(activeSlide.id, { title: titleIn.value });
@@ -2612,17 +3332,29 @@ export class MotionPresentationApp {
         input.click();
       });
 
-      pane.querySelector('#btn-assign-idle-loop')?.addEventListener('click', () => {
-        const input = this.root.querySelector('#single-video-input') as HTMLInputElement;
-        if (!input) return;
-        delete input.dataset.targetSlideId;
-        input.dataset.idleLoopSlideId = activeSlide.id;
-        input.click();
+      pane.querySelector('#btn-open-idle-loop-modal')?.addEventListener('click', () => {
+        const host = this.root.querySelector('#workspace-modal-host') as HTMLElement | null;
+        openIdleLoopModal({
+          host,
+          scope: this.workspaceModalScope,
+          slide: activeSlide,
+          onAssignLoop: () => {
+            const input = this.root.querySelector('#single-video-input') as HTMLInputElement;
+            if (!input) return;
+            delete input.dataset.targetSlideId;
+            input.dataset.idleLoopSlideId = activeSlide.id;
+            input.click();
+          },
+          onRemoveLoop: () => {
+            this.store.setSlideIdleLoopVideo(activeSlide.id, null);
+            this.store.notify(t('notify.idleLoopRemoved'), 'info');
+          },
+          onClose: () => {},
+        });
       });
 
-      pane.querySelector('#btn-remove-idle-loop')?.addEventListener('click', () => {
-        this.store.setSlideIdleLoopVideo(activeSlide.id, null);
-        this.store.notify(t('notify.idleLoopRemoved'), 'info');
+      pane.querySelector('#btn-open-ai-edit-modal')?.addEventListener('click', () => {
+        this.openSurgicalAiSheet(activeSlide, slideIdx, 'slide');
       });
 
       pane.querySelector('#btn-insp-duplicate-slide')?.addEventListener('click', () => {
@@ -2634,15 +3366,19 @@ export class MotionPresentationApp {
       pane.querySelector('#btn-insp-delete-slide')?.addEventListener('click', () => {
         this.promptDeleteSlide(activeSlide.id);
       });
-
-      this.wireSurgicalAiPromptEvents(pane, activeSlide, slides.indexOf(activeSlide), slides.length);
     }
 
     if (activeSegment === 'transition' && activeSlide) {
+      const slideIdx = slides.findIndex((s) => s.id === activeSlide.id);
+      const nextIdx =
+        slideIdx + 1 < slides.length
+          ? slideIdx + 1
+          : settings.loopPresentation && slides.length > 1
+            ? 0
+            : -1;
+      const nextSlide = nextIdx !== -1 ? slides[nextIdx] : null;
       const spec = activeSlide.transitionToNext;
       const vid = spec.videoAsset;
-
-      this.wireSurgicalAiPromptEvents(pane, activeSlide, slides.indexOf(activeSlide), slides.length);
 
       pane.querySelector('#btn-replace-trans-video')?.addEventListener('click', () => {
         const input = this.root.querySelector('#single-video-input') as HTMLInputElement;
@@ -2663,179 +3399,41 @@ export class MotionPresentationApp {
       });
 
       if (vid) {
-        pane.querySelector('#btn-insp-edit-reel-cues')?.addEventListener('click', () => {
-          const ctx = this.store.getReelContextForSlide?.(activeSlide.id);
-          if (ctx) {
-            this.openReelCueModal(ctx.videoAsset, {
-              mode: 'replace-reel',
-              targetVideoAssetId: ctx.videoAsset.id,
-              initialCuePoints: ctx.cuePointsSec,
-              isAlreadyOwnedByStore: true,
-            });
-          }
-        });
-
-        const startIn = pane.querySelector('#insp-trans-start') as HTMLInputElement;
-        const endIn = pane.querySelector('#insp-trans-end') as HTMLInputElement;
-
-        const commitRange = () => {
-          const fallbackStart = spec.startTimeSec ?? 0;
-          const fallbackEnd = spec.endTimeSec ?? vid.durationSec;
-          const rawStart = parseFloat(startIn?.value ?? '');
-          const rawEnd = parseFloat(endIn?.value ?? '');
-          const nextStart = Number.isFinite(rawStart) ? rawStart : fallbackStart;
-          const nextEnd = Number.isFinite(rawEnd) ? rawEnd : fallbackEnd;
-          const ok = this.store.updateTransitionRange(activeSlide.id, nextStart, nextEnd);
-          if (!ok) {
-            if (startIn) startIn.value = fallbackStart.toFixed(2);
-            if (endIn) endIn.value = fallbackEnd.toFixed(2);
-            this.store.notify(t('notify.rangeInvalid'), 'warning');
-          }
-        };
-
-        startIn?.addEventListener('change', commitRange);
-        endIn?.addEventListener('change', commitRange);
-
-        const splitOpenBtn = pane.querySelector('#btn-open-split-popover') as HTMLButtonElement;
-        const splitCard = pane.querySelector('#split-popover-card') as HTMLElement;
-        const splitRange = pane.querySelector('#split-time-range') as HTMLInputElement;
-        const splitNum = pane.querySelector('#split-time-num') as HTMLInputElement;
-        const splitReadout = pane.querySelector('#split-time-readout') as HTMLElement;
-        const splitPreviewImg = pane.querySelector('#split-preview-img') as HTMLImageElement;
-        const splitConfirmBtn = pane.querySelector('#btn-confirm-split-transition') as HTMLButtonElement;
-        const splitCancelBtn = pane.querySelector('#btn-cancel-split-popover') as HTMLButtonElement;
-        const splitStageTimeBtn = pane.querySelector('#btn-split-use-stage-time') as HTMLButtonElement;
-
-        let pendingSplitPreviewTime: number | null = null;
-        let isPreviewLoopRunning = false;
-
-        const flushSplitPreview = async () => {
-          if (isPreviewLoopRunning) return;
-          isPreviewLoopRunning = true;
-          try {
-            while (pendingSplitPreviewTime !== null) {
-              const targetT = pendingSplitPreviewTime;
-              pendingSplitPreviewTime = null;
-              if (!this.activeInspectorSplitSession) {
-                this.activeInspectorSplitSession = await FrameExtractor.createSession(vid);
-              }
-              if (!this.activeInspectorSplitSession) break;
-              const thumb = await this.activeInspectorSplitSession.seekAndCaptureThumb(targetT, 320);
-              if (thumb && splitPreviewImg && splitPreviewImg.isConnected) {
-                splitPreviewImg.src = thumb;
-              }
-            }
-          } catch {
-            // Keep existing preview on transient scrub failure
-          } finally {
-            isPreviewLoopRunning = false;
-          }
-        };
-
-        const setSplitTime = (val: number, fetchThumb = true) => {
-          const minT = parseFloat(splitRange?.min || '0.08');
-          const maxT = parseFloat(splitRange?.max || String(vid.durationSec));
-          const clamped = Number(Math.min(maxT, Math.max(minT, val)).toFixed(2));
-          if (splitRange) splitRange.value = String(clamped);
-          if (splitNum) splitNum.value = clamped.toFixed(2);
-          if (splitReadout) splitReadout.textContent = `${clamped.toFixed(2)}s`;
-          if (fetchThumb) {
-            pendingSplitPreviewTime = clamped;
-            void flushSplitPreview();
-          }
-        };
-
-        splitOpenBtn?.addEventListener('click', () => {
-          if (!splitCard) return;
-          const isHidden = splitCard.style.display === 'none';
-          if (!isHidden) {
-            splitCard.style.display = 'none';
-            this.disposeActiveSplitSession();
-            return;
-          }
-          splitCard.style.display = 'flex';
-          const curStageT = this.latestEngineStatus?.currentVideoTimeSec;
-          const minT = parseFloat(splitRange?.min || '0.08');
-          const maxT = parseFloat(splitRange?.max || String(vid.durationSec));
-          if (typeof curStageT === 'number' && curStageT >= minT && curStageT <= maxT) {
-            setSplitTime(curStageT, true);
-          } else {
-            setSplitTime(parseFloat(splitRange?.value || '0'), true);
-          }
-        });
-
-        splitCancelBtn?.addEventListener('click', () => {
-          if (splitCard) splitCard.style.display = 'none';
-          this.disposeActiveSplitSession();
-        });
-
-        splitRange?.addEventListener('input', () => {
-          const val = parseFloat(splitRange.value);
-          if (Number.isFinite(val)) setSplitTime(val, true);
-        });
-
-        splitNum?.addEventListener('change', () => {
-          const val = parseFloat(splitNum.value);
-          if (Number.isFinite(val)) setSplitTime(val, true);
-        });
-
-        splitStageTimeBtn?.addEventListener('click', () => {
-          const curStageT = this.latestEngineStatus?.currentVideoTimeSec;
-          const minT = parseFloat(splitRange?.min || '0.08');
-          const maxT = parseFloat(splitRange?.max || String(vid.durationSec));
-          if (typeof curStageT === 'number' && curStageT >= minT && curStageT <= maxT) {
-            setSplitTime(curStageT, true);
-          } else {
-            this.store.notify(t('notify.stageTimeOutOfRange'), 'info', 2500);
-          }
-        });
-
-        splitConfirmBtn?.addEventListener('click', async () => {
-          const chosenSec = parseFloat(splitNum?.value || splitRange?.value || '0');
-          splitConfirmBtn.disabled = true;
-          splitConfirmBtn.textContent = t('inspector.splitConfirmBusy');
-          try {
-            this.disposeActiveSplitSession();
-            const created = await this.store.splitTransitionAtTime(activeSlide.id, chosenSec);
-            if (!created) {
-              splitConfirmBtn.disabled = false;
-              splitConfirmBtn.textContent = t('inspector.splitConfirm');
-            }
-          } catch (err) {
-            splitConfirmBtn.disabled = false;
-            splitConfirmBtn.textContent = t('inspector.splitConfirm');
-            this.store.notify(
-              err instanceof Error ? err.message : t('notify.splitFailed'),
-              'error'
-            );
-          }
-        });
-
-        const extractBtn = pane.querySelector('#btn-extract-end-frame') as HTMLButtonElement;
-        extractBtn?.addEventListener('click', async () => {
-          if (extractBtn) {
-            extractBtn.disabled = true;
-            extractBtn.innerHTML = `${Icons.extractFrame}<span>${t('inspector.extractEndBusy')}</span>`;
-          }
-          try {
-            await this.store.extractNextSlideFromTransitionEnd(activeSlide.id, spec.endTimeSec);
-          } catch (err) {
-            this.store.notify(
-              err instanceof Error ? err.message : t('notify.extractFailed'),
-              'error'
-            );
-          } finally {
-            if (extractBtn && extractBtn.isConnected) {
-              extractBtn.disabled = false;
-              extractBtn.innerHTML = `${Icons.extractFrame}<span>${
-                typeof spec.endTimeSec === 'number'
-                  ? t('inspector.extractEndSlice')
-                  : t('inspector.extractEndVideo')
-              }</span>`;
-            }
-          }
+        pane.querySelector('#btn-open-trim-split-modal')?.addEventListener('click', () => {
+          const host = this.root.querySelector('#workspace-modal-host') as HTMLElement | null;
+          const slideReelContext = this.store.getReelContextForSlide?.(activeSlide.id);
+          openTransitionTrimModal({
+            host,
+            scope: this.workspaceModalScope,
+            slide: activeSlide,
+            nextSlide,
+            currentStageVideoTimeSec: this.latestEngineStatus?.currentVideoTimeSec ?? undefined,
+            onCommitRange: (nextStart, nextEnd) =>
+              this.store.updateTransitionRange(activeSlide.id, nextStart, nextEnd),
+            onSplitAtTime: async (chosenSec) =>
+              Boolean(await this.store.splitTransitionAtTime(activeSlide.id, chosenSec)),
+            onExtractEndFrame: async () => {
+              await this.store.extractNextSlideFromTransitionEnd(activeSlide.id, spec.endTimeSec);
+            },
+            onOpenReelCues: slideReelContext
+              ? () => {
+                  this.openReelCueModal(slideReelContext.videoAsset, {
+                    mode: 'replace-reel',
+                    targetVideoAssetId: slideReelContext.videoAsset.id,
+                    initialCuePoints: slideReelContext.cuePointsSec,
+                    isAlreadyOwnedByStore: true,
+                  });
+                }
+              : undefined,
+            onNotify: (msg, kind) => this.store.notify(msg, kind),
+            onClose: () => {},
+          });
         });
       }
+
+      pane.querySelector('#btn-open-ai-edit-modal')?.addEventListener('click', () => {
+        this.openSurgicalAiSheet(activeSlide, slideIdx, 'transition');
+      });
 
       pane.querySelector('#btn-generate-trans-video')?.addEventListener('click', async () => {
         const btn = pane.querySelector('#btn-generate-trans-video') as HTMLButtonElement;
@@ -2897,36 +3495,6 @@ export class MotionPresentationApp {
     }
 
     if (activeSegment === 'settings') {
-      const interruptSel = pane.querySelector('#set-interrupt-behavior') as HTMLSelectElement;
-      interruptSel?.addEventListener('change', () => {
-        this.store.updateSettings({
-          interruptBehavior: interruptSel.value as InterruptBehavior,
-        });
-      });
-
-      const backSel = pane.querySelector('#set-backward-behavior') as HTMLSelectElement;
-      backSel?.addEventListener('change', () => {
-        this.store.updateSettings({
-          backwardBehavior: backSel.value as BackwardBehavior,
-        });
-      });
-
-      const globalSpeedIn = pane.querySelector('#set-global-speed') as HTMLInputElement;
-      const globalSpeedLbl = pane.querySelector('#lbl-global-speed') as HTMLElement;
-      globalSpeedIn?.addEventListener('input', () => {
-        const v = parseFloat(globalSpeedIn.value) || 1.0;
-        if (globalSpeedLbl) globalSpeedLbl.textContent = `${v.toFixed(2)}×`;
-      });
-      globalSpeedIn?.addEventListener('change', () => {
-        const v = parseFloat(globalSpeedIn.value) || 1.0;
-        this.store.updateSettings({ globalPlaybackSpeed: v });
-      });
-
-      const loopCheck = pane.querySelector('#set-loop') as HTMLInputElement;
-      loopCheck?.addEventListener('change', () => {
-        this.store.updateSettings({ loopPresentation: loopCheck.checked });
-      });
-
       const ratioSel = pane.querySelector('#set-aspect-ratio') as HTMLSelectElement;
       ratioSel?.addEventListener('change', () => {
         this.store.updateSettings({ aspectRatio: ratioSel.value as AspectRatioOption });
@@ -2935,27 +3503,6 @@ export class MotionPresentationApp {
       const fitSel = pane.querySelector('#set-fit-mode') as HTMLSelectElement;
       fitSel?.addEventListener('change', () => {
         this.store.updateSettings({ fitMode: fitSel.value as FitMode });
-      });
-
-      const hudSel = pane.querySelector('#set-hud') as HTMLSelectElement;
-      hudSel?.addEventListener('change', () => {
-        this.store.updateSettings({ showPresenterHud: hudSel.value as HudVisibility });
-      });
-
-      const muteCheck = pane.querySelector('#set-master-muted') as HTMLInputElement;
-      muteCheck?.addEventListener('change', () => {
-        this.store.updateSettings({ masterMuted: muteCheck.checked });
-      });
-
-      const volInput = pane.querySelector('#set-master-volume') as HTMLInputElement;
-      const volLbl = pane.querySelector('#lbl-master-volume') as HTMLElement;
-      volInput?.addEventListener('input', () => {
-        const v = parseFloat(volInput.value) || 0.9;
-        if (volLbl) volLbl.textContent = `${Math.round(v * 100)}%`;
-      });
-      volInput?.addEventListener('change', () => {
-        const v = parseFloat(volInput.value) || 0.9;
-        this.store.updateSettings({ masterVolume: v });
       });
 
       const stageBg = pane.querySelector('#set-stage-bg') as HTMLInputElement;
@@ -2980,72 +3527,42 @@ export class MotionPresentationApp {
         });
       });
 
-      const preloadSel = pane.querySelector('#set-preload-strategy') as HTMLSelectElement;
-      preloadSel?.addEventListener('change', () => {
-        this.store.updateSettings({ preloadStrategy: preloadSel.value as 'all' | 'adjacent' });
+      const volInput = pane.querySelector('#set-master-volume') as HTMLInputElement;
+      const volLbl = pane.querySelector('#lbl-master-volume') as HTMLElement;
+      volInput?.addEventListener('input', () => {
+        const v = parseFloat(volInput.value) || 0.9;
+        if (volLbl) volLbl.textContent = `${Math.round(v * 100)}%`;
+      });
+      volInput?.addEventListener('change', () => {
+        const v = parseFloat(volInput.value) || 0.9;
+        this.store.updateSettings({ masterVolume: v });
       });
 
-      const autoHideCheck = pane.querySelector('#set-autohide-cursor') as HTMLInputElement;
-      autoHideCheck?.addEventListener('change', () => {
-        this.store.updateSettings({ autoHideCursor: autoHideCheck.checked });
+      const muteCheck = pane.querySelector('#set-master-muted') as HTMLInputElement;
+      muteCheck?.addEventListener('change', () => {
+        this.store.updateSettings({ masterMuted: muteCheck.checked });
       });
 
-      const fallbackSel = pane.querySelector('#set-default-fallback-style') as HTMLSelectElement;
-      fallbackSel?.addEventListener('change', () => {
-        this.store.updateSettings({ defaultFallbackStyle: fallbackSel.value as FallbackTransitionStyle });
+      const loopCheck = pane.querySelector('#set-loop') as HTMLInputElement;
+      loopCheck?.addEventListener('change', () => {
+        this.store.updateSettings({ loopPresentation: loopCheck.checked });
       });
 
-      const fallbackDurIn = pane.querySelector('#set-default-fallback-dur') as HTMLInputElement;
-      fallbackDurIn?.addEventListener('change', () => {
-        const d = parseInt(fallbackDurIn.value, 10) || 650;
-        this.store.updateSettings({ defaultFallbackDurationMs: d });
+      pane.querySelector('#btn-open-engine-prefs-modal')?.addEventListener('click', () => {
+        this.openEnginePrefsSheet();
+      });
+
+      pane.querySelector('#btn-open-deck-stats-modal')?.addEventListener('click', () => {
+        this.openDeckStatsSheet();
+      });
+
+      pane.querySelector('#btn-open-skins-from-insp')?.addEventListener('click', () => {
+        this.toggleSkinPopover();
       });
     }
-  }
 
-  private renderSurgicalAiPromptGroup(
-    activeSlide: SlideNode,
-    slideIdx: number,
-    totalSlides: number,
-    defaultScope: 'slide' | 'transition'
-  ): string {
-    return renderSurgicalAiPromptMarkup({
-      activeSlide,
-      slideIdx,
-      totalSlides,
-      defaultScope,
-      scopeOverride: this.aiEditScopeOverride,
-      draftInstruction: this.aiEditDraftInstruction,
-      aiMeta: this.store.getProjectAiSourceMeta(),
-      currentVideoTimeSec: this.previewEngine?.getActiveVideoTimeSec?.() ?? null,
-    });
-  }
-
-  private wireSurgicalAiPromptEvents(
-    pane: HTMLElement,
-    activeSlide: SlideNode,
-    slideIdx: number,
-    totalSlides: number
-  ): void {
-    wireSurgicalAiPromptView(
-      pane,
-      this.inspectorAiScope,
-      activeSlide,
-      slideIdx,
-      totalSlides,
-      {
-        getAiMeta: () => this.store.getProjectAiSourceMeta(),
-        setAiMeta: (meta) => this.store.setProjectAiSourceMeta(meta),
-        getCurrentVideoTimeSec: () => this.previewEngine?.getActiveVideoTimeSec?.() ?? null,
-        onDraftChange: (draft, scope) => {
-          this.aiEditDraftInstruction = draft;
-          this.aiEditScopeOverride = scope;
-        },
-        onNotifyCopied: () => {
-          this.store.notify(t('notify.aiPromptCopied'), 'success', 2500);
-        },
-      }
-    );
+    this.inspectorSelectsScope.clear();
+    enhanceAppleSelects(pane, this.inspectorSelectsScope);
   }
 
   private renderToast(): void {
@@ -3507,6 +4024,41 @@ export class MotionPresentationApp {
     this.renderWindowToolbar();
 
     try {
+      if (this.isPresentingFullscreen) {
+        await this.exitFullscreenPresentation();
+      }
+      if (this.isModalOpen && this.activeModalClose) {
+        this.activeModalClose();
+      }
+
+      if (window.desktopAPI?.openDemoProject) {
+        const opened = await window.desktopAPI.openDemoProject();
+        if (opened) {
+          await this.store.loadOpenedDesktopProject(opened);
+          this.currentProjectFilePath = null;
+          this.syncWindowTitle();
+          this.store.notify(t('notify.demoReady'), 'success', 4500);
+          return;
+        }
+      }
+
+      if (typeof fetch === 'function') {
+        try {
+          const res = await fetch('./demo/studio-showcase.mpres');
+          if (res.ok) {
+            const bytes = new Uint8Array(await res.arrayBuffer());
+            const parsed = ProjectSerializer.parseProjectBytes(bytes);
+            await this.store.loadProjectBundle(parsed);
+            this.currentProjectFilePath = null;
+            this.syncWindowTitle();
+            this.store.notify(t('notify.demoReady'), 'success', 4500);
+            return;
+          }
+        } catch {
+          // Fall back to procedural demo generator when bundled .mpres is unavailable
+        }
+      }
+
       const demoSlides = await DemoGenerator.generateDemoSlides((msg) => {
         this.store.notify(msg, 'info', 2000);
       });
@@ -3593,7 +4145,7 @@ export class MotionPresentationApp {
             <div class="presenter-notes-controls">
               <button class="btn btn-xs" id="fs-notes-font-dec" type="button" title="${this.escapeHtml(t('presenter.notesFontDec'))}">A-</button>
               <button class="btn btn-xs" id="fs-notes-font-inc" type="button" title="${this.escapeHtml(t('presenter.notesFontInc'))}">A+</button>
-              <button class="btn btn-xs" id="fs-notes-close" type="button" title="${this.escapeHtml(t('presenter.closeShortcut'))}">✕</button>
+              <button class="btn btn-xs" id="fs-notes-close" type="button" title="${this.escapeHtml(t('presenter.closeShortcut'))}">${Icons.close}</button>
             </div>
           </div>
           <div class="presenter-notes-body" id="fs-notes-body" style="font-size:${this.presenterNotesFontSize}px;"></div>
@@ -4163,6 +4715,12 @@ export class MotionPresentationApp {
             this.latestEngineStatus?.currentSlideIndex || 0
           );
           break;
+        case 'open-shortcuts':
+          this.openShortcutsHelpModal();
+          break;
+        case 'open-about':
+          void this.openAboutModal();
+          break;
       }
     });
   }
@@ -4504,17 +5062,6 @@ export class MotionPresentationApp {
         this.exitFullscreenPresentation();
       }
     });
-  }
-
-  private disposeActiveSplitSession(): void {
-    if (this.activeInspectorSplitSession) {
-      try {
-        this.activeInspectorSplitSession.dispose();
-      } catch {
-        // Ignore disposal errors
-      }
-      this.activeInspectorSplitSession = null;
-    }
   }
 
   private formatArabicSlideCount(count: number): string {
@@ -5577,6 +6124,9 @@ export class MotionPresentationApp {
     const cancelDetectBtn = host.querySelector('#btn-reel-cancel-detect') as HTMLButtonElement;
     const autoDetectBtn = host.querySelector('#btn-reel-auto-detect') as HTMLButtonElement;
     const sensitivitySel = host.querySelector('#reel-detect-sensitivity') as HTMLSelectElement;
+    this.reelSelectsScope.clear();
+    enhanceAppleSelects(host.querySelector('.reel-actions-bar') as HTMLElement | null, this.reelSelectsScope);
+    const reelCardsSelectsScope = this.reelSelectsScope.createChildScope();
     const matchRatioChk = host.querySelector('#chk-reel-match-ratio') as HTMLInputElement | null;
     const applyBtn = host.querySelector('#btn-reel-apply') as HTMLButtonElement;
     const cancelBtn = host.querySelector('#btn-reel-cancel') as HTMLButtonElement;
@@ -6371,6 +6921,9 @@ export class MotionPresentationApp {
           renderAllCueUi();
         });
       });
+
+      reelCardsSelectsScope.clear();
+      enhanceAppleSelects(cuesListEl, reelCardsSelectsScope);
     };
 
     const renderAllCueUi = () => {
@@ -6408,6 +6961,7 @@ export class MotionPresentationApp {
       isClosed = true;
       this.isModalOpen = false;
       this.activeModalClose = null;
+      this.reelSelectsScope.clear();
       stopPlaybackRaf();
       window.removeEventListener('keydown', onModalKeyDown, true);
       modalAbort.abort();
@@ -6922,11 +7476,15 @@ export class MotionPresentationApp {
       {
         onOpenCues: () => this.openReelStudioForSelection(),
         onToggleCollapse: () => this.toggleTimelineDock(),
+        onSwitchToSide: () => this.setSequenceLayoutPreference('side'),
         onSelectSlide: (slideId) => this.store.setSelection({ type: 'slide', slideId }),
+        onContextMenuSlide: (slideId, clientX, clientY) =>
+          this.openSlideContextMenu(slideId, clientX, clientY),
         onSelectTransition: (slideId) =>
           this.store.setSelection({ type: 'transition', slideId }),
       }
     );
+    this.reconcileWorkspaceLayout();
   }
 
   private syncTimelineDockActiveState(): void {
@@ -6952,6 +7510,8 @@ export class MotionPresentationApp {
       typeof forceCollapsed === 'boolean' ? forceCollapsed : !this.isTimelineDockCollapsed;
     const dock = this.root.querySelector('#studio-timeline-dock') as HTMLElement | null;
     syncTimelineDockCollapseView(dock, this.isTimelineDockCollapsed);
+    this.updateCanvasFrameDimensions(this.store.getSettings());
+    this.previewEngine?.resize?.();
   }
 
   private closeSlideContextMenu(): void {
@@ -7120,6 +7680,21 @@ export class MotionPresentationApp {
         run: () => this.toggleTheme(),
       },
       {
+        id: 'cmd-toggle-overview',
+        group: t('cmd.groupView'),
+        label: t('presenter.gridAria'),
+        icon: Icons.grid,
+        disabled: !hasSlides,
+        run: () => this.toggleStageOverviewGrid(),
+      },
+      ...STUDIO_SKINS.map((sk) => ({
+        id: `cmd-skin-${sk.id}`,
+        group: 'Studio Skins',
+        label: `Skin: ${sk.name}`,
+        icon: Icons.palette,
+        run: () => this.applySkinSelection(sk.id),
+      })),
+      {
         id: 'cmd-toggle-lang',
         group: t('cmd.groupView'),
         label: t('cmd.toggleLang'),
@@ -7157,6 +7732,15 @@ export class MotionPresentationApp {
         shortcut: '?',
         icon: Icons.keyboard,
         run: () => this.openShortcutsHelpModal(),
+      },
+      {
+        id: 'cmd-about-app',
+        group: t('cmd.groupView'),
+        label: t('toolbar.about'),
+        icon: Icons.info,
+        run: () => {
+          void this.openAboutModal();
+        },
       },
       {
         id: 'cmd-start-fullscreen',
@@ -7205,6 +7789,29 @@ export class MotionPresentationApp {
         this.isCommandPaletteOpen = false;
         this.activeModalClose = null;
       },
+    });
+  }
+
+  public async openAboutModal(): Promise<void> {
+    this.activeModalClose?.();
+    const host = (this.root.querySelector('#shortcuts-modal-host') ||
+      this.root.querySelector('#choice-modal-host')) as HTMLElement | null;
+    if (!host) return;
+
+    let version = FALLBACK_APP_VERSION;
+    try {
+      const resolved = await window.desktopAPI?.getAppVersion?.();
+      if (resolved && resolved.trim()) {
+        version = resolved.trim();
+      }
+    } catch {
+      // Fallback to compile-time version when desktopAPI is absent
+    }
+
+    this.isModalOpen = true;
+    this.activeModalClose = openAboutModalView(host, this.modalScope, version, () => {
+      this.isModalOpen = false;
+      this.activeModalClose = null;
     });
   }
 

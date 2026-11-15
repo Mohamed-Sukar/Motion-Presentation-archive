@@ -8,6 +8,7 @@ export interface ToolbarRenderState {
   hasSlides: boolean;
   isNavigatorVisible: boolean;
   isInspectorVisible: boolean;
+  isStagePopoverOpen?: boolean;
   isGeneratingDemo: boolean;
   canUndo: boolean;
   canRedo: boolean;
@@ -31,6 +32,8 @@ export interface ToolbarCallbacks {
   onOpenCommandPalette: () => void;
   onToggleTheme: () => void;
   onToggleLanguage: () => void;
+  onOpenStageSettings?: (anchorEl: HTMLElement) => void;
+  onOpenMoreMenu?: (anchorEl: HTMLElement) => void;
   onStartFullscreen: () => void;
 }
 
@@ -61,7 +64,7 @@ export function renderWindowToolbarView(
       </button>
       <div class="toolbar-divider"></div>
       <div class="doc-title-shell">
-        <span class="doc-brand-dot" aria-hidden="true"></span>
+        <span class="doc-brand-logo" aria-hidden="true">${Icons.brandAppIconCompact}</span>
         <input
           type="text"
           class="doc-title-input"
@@ -103,9 +106,15 @@ export function renderWindowToolbarView(
           <span class="btn-label">${escapeHtml(t('toolbar.addSlide'))}</span>
         </button>
 
-        <button class="btn btn-toolbar is-compactable" id="btn-load-demo" ${state.isGeneratingDemo ? 'disabled' : ''} title="${escapeHtml(t('toolbar.loadDemoTitle'))}" aria-label="${escapeHtml(t('toolbar.loadDemoTitle'))}">
-          ${Icons.sparkles}
-          <span class="btn-label">${escapeHtml(state.isGeneratingDemo ? t('toolbar.loadDemoBusy') : t('toolbar.loadDemo'))}</span>
+        <button
+          class="btn btn-toolbar is-compactable ${state.isStagePopoverOpen ? 'active-pane' : ''}"
+          id="btn-stage-settings"
+          type="button"
+          title="${escapeHtml(t('toolbar.stageRatioTitle'))}"
+          aria-label="${escapeHtml(t('toolbar.stageRatioTitle'))}"
+        >
+          ${Icons.ratio}
+          <span class="btn-label">${escapeHtml(t('toolbar.stageRatio'))}</span>
         </button>
       </div>
 
@@ -165,6 +174,17 @@ export function renderWindowToolbarView(
         >
           ${inspIcon}
         </button>
+        <button
+          class="btn btn-toolbar btn-icon-only"
+          id="btn-toolbar-more"
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded="false"
+          title="${escapeHtml(t('toolbar.moreActions'))}"
+          aria-label="${escapeHtml(t('toolbar.moreActions'))}"
+        >
+          ${Icons.moreHorizontal}
+        </button>
       </div>
       <button class="btn btn-prominent btn-hero-present" id="btn-start-fullscreen" ${!state.hasSlides ? 'disabled' : ''} title="${escapeHtml(t('toolbar.playPresentationTitle'))}">
         ${Icons.playFill}
@@ -184,7 +204,11 @@ export function renderWindowToolbarView(
   scope.listen(toolbar.querySelector('#btn-toggle-navigator'), 'click', callbacks.onToggleNavigator);
   scope.listen(toolbar.querySelector('#btn-toggle-inspector'), 'click', callbacks.onToggleInspector);
   scope.listen(toolbar.querySelector('#btn-open-project'), 'click', callbacks.onOpenProject);
-  scope.listen(toolbar.querySelector('#btn-load-demo'), 'click', callbacks.onGenerateDemo);
+  const stageSettingsBtn = toolbar.querySelector('#btn-stage-settings') as HTMLElement | null;
+  scope.listen(stageSettingsBtn, 'click', (e) => {
+    e.stopPropagation();
+    if (stageSettingsBtn) callbacks.onOpenStageSettings?.(stageSettingsBtn);
+  });
   scope.listen(toolbar.querySelector('#btn-batch-import'), 'click', callbacks.onImportMedia);
   scope.listen(toolbar.querySelector('#btn-reel-workflow'), 'click', callbacks.onOpenReelWorkflow);
   scope.listen(toolbar.querySelector('#btn-add-slide'), 'click', callbacks.onAddSlide);
@@ -192,6 +216,11 @@ export function renderWindowToolbarView(
   scope.listen(toolbar.querySelector('#btn-studio-undo'), 'click', callbacks.onUndo);
   scope.listen(toolbar.querySelector('#btn-studio-redo'), 'click', callbacks.onRedo);
   scope.listen(toolbar.querySelector('#btn-shortcuts-help'), 'click', callbacks.onOpenShortcuts);
+  const moreBtn = toolbar.querySelector('#btn-toolbar-more') as HTMLElement | null;
+  scope.listen(moreBtn, 'click', (e) => {
+    e.stopPropagation();
+    if (moreBtn) callbacks.onOpenMoreMenu?.(moreBtn);
+  });
   scope.listen(toolbar.querySelector('#btn-start-fullscreen'), 'click', callbacks.onStartFullscreen);
 }
 

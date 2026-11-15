@@ -1,4 +1,14 @@
 import type { TranslationKey } from '../core/i18n';
+import {
+  applyDocumentSkin,
+  getSavedStudioSkin,
+  getStudioSkin,
+  initStudioSkin,
+  setStudioSkin,
+  StudioSkinId,
+} from './skins';
+
+let lastDarkSkinId: StudioSkinId = 'framer';
 
 export type ThemePreference = 'system' | 'dark' | 'light';
 export type ResolvedTheme = 'dark' | 'light';
@@ -125,8 +135,24 @@ export function detectInitialTheme(onSystemChange?: (resolved: ResolvedTheme) =>
   currentResolvedTheme = resolved;
   themeInitialized = true;
   applyDocumentTheme(resolved, pref);
+  if (resolved === 'light' && getStudioSkin() !== 'paper') {
+    const cur = getStudioSkin();
+    if (cur !== 'paper') lastDarkSkinId = cur;
+    applyDocumentSkin('paper');
+  } else if (resolved === 'dark' && getStudioSkin() === 'paper') {
+    const saved = getSavedStudioSkin();
+    applyDocumentSkin(saved && saved !== 'paper' ? saved : lastDarkSkinId);
+  }
+  const initialSkin = initStudioSkin(resolved);
+  if (initialSkin !== 'paper') lastDarkSkinId = initialSkin;
   attachSystemThemeListener(onSystemChange);
   return resolved;
+}
+
+export function selectStudioSkin(skinId: StudioSkinId): void {
+  const def = setStudioSkin(skinId);
+  if (def.id !== 'paper') lastDarkSkinId = def.id;
+  setThemePreference(def.mode, { persist: true, syncDesktop: true });
 }
 
 export function getThemePreference(): ThemePreference {
@@ -153,6 +179,14 @@ export function setThemePreference(
   currentResolvedTheme = resolved;
   themeInitialized = true;
   applyDocumentTheme(resolved, pref);
+  if (resolved === 'light' && getStudioSkin() !== 'paper') {
+    const cur = getStudioSkin();
+    if (cur !== 'paper') lastDarkSkinId = cur;
+    applyDocumentSkin('paper');
+  } else if (resolved === 'dark' && getStudioSkin() === 'paper') {
+    const saved = getSavedStudioSkin();
+    applyDocumentSkin(saved && saved !== 'paper' ? saved : lastDarkSkinId);
+  }
 
   if (persist) {
     try {

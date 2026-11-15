@@ -1,4 +1,4 @@
-import { t } from '../../core/i18n';
+import { isRtlLanguage, t } from '../../core/i18n';
 import { ComponentScope, escapeHtml } from '../core/ComponentLifecycle';
 import { Icons } from '../icons';
 
@@ -52,43 +52,60 @@ export function openSlideContextMenuView(
     window.innerHeight > 0
       ? window.innerHeight
       : 800;
-  const left = Math.max(8, Math.min(clientX, vw - 228));
-  const top = Math.max(8, Math.min(clientY, vh - 290));
+  const rtl = isRtlLanguage();
+  const menuW = 224;
+  const rawLeft = rtl ? clientX - menuW : clientX;
+  const left = Math.max(8, Math.min(rawLeft, vw - menuW - 8));
+  const top = Math.max(8, Math.min(clientY, vh - 296));
 
   const canMoveUp = slideIndex > 0;
   const canMoveDown = slideIndex < totalSlides - 1;
 
   host.innerHTML = `
-    <div class="studio-context-menu" id="studio-context-menu" role="menu" style="left:${left}px;top:${top}px;">
-      <button type="button" class="ctx-menu-item" id="ctx-move-up" role="menuitem" ${!canMoveUp ? 'disabled' : ''}>
-        ${Icons.chevronUp}
-        <span>${escapeHtml(t('ctx.moveUp'))}</span>
+    <div class="apple-glass-menu studio-context-menu" id="studio-context-menu" role="menu" style="left:${left}px;top:${top}px;">
+      <button type="button" class="apple-menu-item ctx-menu-item" id="ctx-move-up" role="menuitem" ${!canMoveUp ? 'disabled' : ''}>
+        <span class="apple-menu-item-main">
+          <span class="apple-menu-icon">${Icons.chevronUp}</span>
+          <span class="apple-menu-item-label">${escapeHtml(t('ctx.moveUp'))}</span>
+        </span>
       </button>
-      <button type="button" class="ctx-menu-item" id="ctx-move-down" role="menuitem" ${!canMoveDown ? 'disabled' : ''}>
-        ${Icons.chevronDown}
-        <span>${escapeHtml(t('ctx.moveDown'))}</span>
+      <button type="button" class="apple-menu-item ctx-menu-item" id="ctx-move-down" role="menuitem" ${!canMoveDown ? 'disabled' : ''}>
+        <span class="apple-menu-item-main">
+          <span class="apple-menu-icon">${Icons.chevronDown}</span>
+          <span class="apple-menu-item-label">${escapeHtml(t('ctx.moveDown'))}</span>
+        </span>
       </button>
-      <button type="button" class="ctx-menu-item" id="ctx-duplicate" role="menuitem">
-        ${Icons.duplicate}
-        <span>${escapeHtml(t('ctx.duplicate'))}</span>
+      <button type="button" class="apple-menu-item ctx-menu-item" id="ctx-duplicate" role="menuitem">
+        <span class="apple-menu-item-main">
+          <span class="apple-menu-icon">${Icons.duplicate}</span>
+          <span class="apple-menu-item-label">${escapeHtml(t('ctx.duplicate'))}</span>
+        </span>
       </button>
-      <div class="ctx-menu-sep" role="separator"></div>
-      <button type="button" class="ctx-menu-item" id="ctx-edit-transition" role="menuitem" ${!canMoveDown ? 'disabled' : ''}>
-        ${Icons.sliders}
-        <span>${escapeHtml(t('ctx.editTransition'))}</span>
+      <div class="apple-menu-sep ctx-menu-sep" role="separator"></div>
+      <button type="button" class="apple-menu-item ctx-menu-item" id="ctx-edit-transition" role="menuitem" ${!canMoveDown ? 'disabled' : ''}>
+        <span class="apple-menu-item-main">
+          <span class="apple-menu-icon">${Icons.sliders}</span>
+          <span class="apple-menu-item-label">${escapeHtml(t('ctx.editTransition'))}</span>
+        </span>
       </button>
-      <button type="button" class="ctx-menu-item" id="ctx-replace-image" role="menuitem">
-        ${Icons.photoPlus}
-        <span>${escapeHtml(t('ctx.replaceImage'))}</span>
+      <button type="button" class="apple-menu-item ctx-menu-item" id="ctx-replace-image" role="menuitem">
+        <span class="apple-menu-item-main">
+          <span class="apple-menu-icon">${Icons.photoPlus}</span>
+          <span class="apple-menu-item-label">${escapeHtml(t('ctx.replaceImage'))}</span>
+        </span>
       </button>
-      <button type="button" class="ctx-menu-item" id="ctx-open-cues" role="menuitem" ${!hasReelContext ? 'disabled' : ''}>
-        ${Icons.splitCue}
-        <span>${escapeHtml(t('ctx.openCueStudio'))}</span>
+      <button type="button" class="apple-menu-item ctx-menu-item" id="ctx-open-cues" role="menuitem" ${!hasReelContext ? 'disabled' : ''}>
+        <span class="apple-menu-item-main">
+          <span class="apple-menu-icon">${Icons.splitCue}</span>
+          <span class="apple-menu-item-label">${escapeHtml(t('ctx.openCueStudio'))}</span>
+        </span>
       </button>
-      <div class="ctx-menu-sep" role="separator"></div>
-      <button type="button" class="ctx-menu-item danger" id="ctx-delete-slide" role="menuitem">
-        ${Icons.trash}
-        <span>${escapeHtml(t('ctx.delete'))}</span>
+      <div class="apple-menu-sep ctx-menu-sep" role="separator"></div>
+      <button type="button" class="apple-menu-item ctx-menu-item is-danger danger" id="ctx-delete-slide" role="menuitem">
+        <span class="apple-menu-item-main">
+          <span class="apple-menu-icon">${Icons.trash}</span>
+          <span class="apple-menu-item-label">${escapeHtml(t('ctx.delete'))}</span>
+        </span>
       </button>
     </div>
   `;
@@ -110,6 +127,22 @@ export function openSlideContextMenuView(
     scope.listen<KeyboardEvent>(window, 'keydown', (e) => {
       if (e.key === 'Escape') {
         close();
+      } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        const items = Array.from(
+          host.querySelectorAll<HTMLButtonElement>('.ctx-menu-item:not(:disabled)')
+        );
+        if (items.length === 0) return;
+        e.preventDefault();
+        const cur = items.indexOf(document.activeElement as HTMLButtonElement);
+        const next =
+          e.key === 'ArrowDown'
+            ? cur === -1
+              ? 0
+              : (cur + 1) % items.length
+            : cur <= 0
+              ? items.length - 1
+              : cur - 1;
+        items[next]?.focus();
       }
     });
   }

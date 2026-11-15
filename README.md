@@ -1,6 +1,10 @@
+<p align="center">
+  <img src="../docs/brand/motion-studio-banner.svg" alt="Motion Presentation Studio — Kinetic M Banner" width="100%" />
+</p>
+
 # Motion Presentation Studio
 
-![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.2.1-FF3D2E.svg)
 ![Electron](https://img.shields.io/badge/Electron-33.x-47848F.svg?logo=electron&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6.svg?logo=typescript&logoColor=white)
 ![Vite](https://img.shields.io/badge/Vite-6.x-646CFF.svg?logo=vite&logoColor=white)

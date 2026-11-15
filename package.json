@@ -35,6 +35,9 @@
       "build/icon.png",
       "package.json"
     ],
+    "asarUnpack": [
+      "dist/demo/**/*"
+    ],
     "win": {
       "target": [
         {
@@ -52,7 +55,11 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Motion Presentation Studio"
+      "shortcutName": "Motion Presentation Studio",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerSidebar": "build/installerSidebar.bmp",
+      "installerHeader": "build/installerHeader.bmp"
     },
     "fileAssociations": [
       {

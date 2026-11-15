@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   setFullScreen: (flag) => ipcRenderer.invoke('window:set-fullscreen', flag),
   isFullScreen: () => ipcRenderer.invoke('window:is-fullscreen'),
   setWindowTitle: (title) => ipcRenderer.invoke('window:set-title', title),
+  getAppVersion: () => ipcRenderer.invoke('app:get-version'),
   getSystemLocale: () => ipcRenderer.invoke('app:get-locale'),
   setLanguage: (lang) => ipcRenderer.invoke('app:set-language', lang),
   setTheme: (themePref) => ipcRenderer.invoke('app:set-theme', themePref),
@@ -12,6 +13,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   // Streaming open/save & mpres:// media channels (Phase 1)
   openProjectStreamedDialog: () => ipcRenderer.invoke('project:open-dialog'),
   openProjectByPath: (filePath) => ipcRenderer.invoke('project:open-path', filePath),
+  openDemoProject: () => ipcRenderer.invoke('project:open-demo'),
   saveProjectStreamed: (payload) => ipcRenderer.invoke('project:save-streamed', payload),
   closeProjectToken: (projectToken) => ipcRenderer.invoke('project:close-token', projectToken),
   onSaveProgress: (callback) => {
@@ -37,6 +39,14 @@ contextBridge.exposeInMainWorld('desktopAPI', {
       return null;
     }
   },
+
+  // Recent sessions history (Welcome Workspace)
+  listRecentProjects: () => ipcRenderer.invoke('recent:list'),
+  upsertRecentProject: (entry) => ipcRenderer.invoke('recent:upsert', entry),
+  togglePinRecentProject: (filePath) => ipcRenderer.invoke('recent:toggle-pin', filePath),
+  removeRecentProject: (filePath) => ipcRenderer.invoke('recent:remove', filePath),
+  clearRecentProjects: () => ipcRenderer.invoke('recent:clear'),
+  revealRecentProject: (filePath) => ipcRenderer.invoke('recent:reveal', filePath),
 
   // Legacy channels kept during transition
   openProjectDialog: () => ipcRenderer.invoke('dialog:open-project'),

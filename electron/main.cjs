@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, dialog, nativeTheme, protocol } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, dialog, nativeTheme, protocol, screen, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { extractProjectPathFromArgv, isSupportedProjectFile } = require('./argvHelper.cjs');
@@ -76,6 +76,9 @@ const MENU_TEXT = {
     toggleNavigator: 'إظهار/إخفاء متصفح الشرائح',
     toggleInspector: 'إظهار/إخفاء لوحة الخصائص',
     playPresentation: 'تشغيل العرض بملء الشاشة',
+    resetZoom: 'الحجم الافتراضي للواجهة',
+    zoomIn: 'تكبير الواجهة',
+    zoomOut: 'تصغير الواجهة',
     toggleFullscreen: 'ملء نافذة النظام',
     openProjectTitle: 'فتح ملف مشروع العرض الحركي',
     saveProjectTitle: 'حفظ ملف العرض التقديمي',
@@ -91,6 +94,9 @@ const MENU_TEXT = {
     backupFoundDetail: 'هل تريد استعادة النسخة الاحتياطية وفتح المشروع؟',
     backupRestoreBtn: 'استعادة وفتح',
     backupCancelBtn: 'إلغاء',
+    help: 'مساعدة',
+    shortcuts: 'اختصارات لوحة المفاتيح',
+    about: 'حول Motion Presentation Studio',
   },
   en: {
     file: 'File',
@@ -109,6 +115,9 @@ const MENU_TEXT = {
     toggleNavigator: 'Toggle Slide Navigator',
     toggleInspector: 'Toggle Inspector Panel',
     playPresentation: 'Play Fullscreen Presentation',
+    resetZoom: 'Actual Size',
+    zoomIn: 'Zoom In',
+    zoomOut: 'Zoom Out',
     toggleFullscreen: 'Toggle Window Fullscreen',
     openProjectTitle: 'Open Motion Presentation Project',
     saveProjectTitle: 'Save Presentation Project',
@@ -124,6 +133,9 @@ const MENU_TEXT = {
     backupFoundDetail: 'Restore the backup and open the project?',
     backupRestoreBtn: 'Restore & Open',
     backupCancelBtn: 'Cancel',
+    help: 'Help',
+    shortcuts: 'Keyboard Shortcuts',
+    about: 'About Motion Presentation Studio',
   },
 };
 
@@ -318,7 +330,26 @@ function buildNativeMenu(lang = getActiveLanguage()) {
           click: () => sendCommand('start-presentation'),
         },
         { type: 'separator' },
+        { role: 'resetZoom', label: L.resetZoom },
+        { role: 'zoomIn', label: L.zoomIn },
+        { role: 'zoomOut', label: L.zoomOut },
+        { type: 'separator' },
         { role: 'togglefullscreen', label: L.toggleFullscreen },
+      ],
+    },
+    {
+      label: L.help,
+      submenu: [
+        {
+          label: L.shortcuts,
+          accelerator: 'F1',
+          click: () => sendCommand('open-shortcuts'),
+        },
+        { type: 'separator' },
+        {
+          label: L.about,
+          click: () => sendCommand('open-about'),
+        },
       ],
     },
   ];
@@ -327,17 +358,131 @@ function buildNativeMenu(lang = getActiveLanguage()) {
   Menu.setApplicationMenu(menu);
 }
 
+const WINDOW_MIN_WIDTH = 720;
+const WINDOW_MIN_HEIGHT = 500;
+
+function getWindowStatePath() {
+  return path.join(app.getPath('userData'), 'window-state.json');
+}
+
+function resolveInitialWindowState() {
+  const primaryWorkArea = screen.getPrimaryDisplay().workArea;
+  const defaultWidth = Math.min(
+    1360,
+    Math.max(WINDOW_MIN_WIDTH, Math.round(primaryWorkArea.width * 0.88))
+  );
+  const defaultHeight = Math.min(
+    840,
+    Math.max(WINDOW_MIN_HEIGHT, Math.round(primaryWorkArea.height * 0.88))
+  );
+  const fallback = {
+    width: defaultWidth,
+    height: defaultHeight,
+    isMaximized: false,
+  };
+
+  try {
+    const raw = fs.readFileSync(getWindowStatePath(), 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return fallback;
+
+    const width = Math.max(
+      WINDOW_MIN_WIDTH,
+      Math.min(primaryWorkArea.width, Math.round(Number(parsed.width) || defaultWidth))
+    );
+    const height = Math.max(
+      WINDOW_MIN_HEIGHT,
+      Math.min(primaryWorkArea.height, Math.round(Number(parsed.height) || defaultHeight))
+    );
+    const isMaximized = Boolean(parsed.isMaximized);
+
+    const hasCoords = Number.isFinite(parsed.x) && Number.isFinite(parsed.y);
+    if (hasCoords) {
+      const candidate = {
+        x: Math.round(parsed.x),
+        y: Math.round(parsed.y),
+        width,
+        height,
+      };
+      const isVisible = screen.getAllDisplays().some((d) => {
+        const wa = d.workArea;
+        return (
+          candidate.x + 80 > wa.x &&
+          candidate.x < wa.x + wa.width - 80 &&
+          candidate.y + 40 > wa.y &&
+          candidate.y < wa.y + wa.height - 40
+        );
+      });
+      if (isVisible) {
+        return { ...candidate, isMaximized };
+      }
+    }
+
+    return { width, height, isMaximized };
+  } catch {
+    return fallback;
+  }
+}
+
+function bindWindowStatePersistence(win) {
+  let saveTimer = null;
+
+  const persistNow = () => {
+    if (!win || win.isDestroyed()) return;
+    try {
+      const isMaximized = win.isMaximized();
+      const bounds = isMaximized ? win.getNormalBounds() : win.getBounds();
+      const payload = {
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+        isMaximized,
+      };
+      fs.writeFileSync(getWindowStatePath(), JSON.stringify(payload), 'utf-8');
+    } catch {
+      // Ignore non-critical window-state write errors
+    }
+  };
+
+  const scheduleSave = () => {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      persistNow();
+    }, 250);
+  };
+
+  win.on('resize', scheduleSave);
+  win.on('move', scheduleSave);
+  win.on('maximize', persistNow);
+  win.on('unmaximize', persistNow);
+  win.on('close', () => {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    persistNow();
+  });
+}
+
 function createWindow() {
   const iconPath = path.join(__dirname, '..', 'build', 'icon.png');
   rendererReady = false;
+  const initialState = resolveInitialWindowState();
 
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    minWidth: 1024,
-    minHeight: 680,
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#09090b' : '#f8f8fa',
-    backgroundMaterial: 'mica',
+    width: initialState.width,
+    height: initialState.height,
+    ...(Number.isFinite(initialState.x) && Number.isFinite(initialState.y)
+      ? { x: initialState.x, y: initialState.y }
+      : {}),
+    minWidth: WINDOW_MIN_WIDTH,
+    minHeight: WINDOW_MIN_HEIGHT,
+    resizable: true,
+    maximizable: true,
+    minimizable: true,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0A0A0A' : '#f8f8fa',
     title: 'Motion Presentation Studio',
     ...(fs.existsSync(iconPath) ? { icon: iconPath } : {}),
     webPreferences: {
@@ -346,6 +491,11 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+
+  if (initialState.isMaximized) {
+    mainWindow.maximize();
+  }
+  bindWindowStatePersistence(mainWindow);
 
   mainWindow.webContents.on('did-start-loading', () => {
     rendererReady = false;
@@ -361,6 +511,66 @@ function createWindow() {
   } else {
     mainWindow.loadURL(devUrl);
   }
+}
+
+function getRecentProjectsFilePath() {
+  return path.join(app.getPath('userData'), 'recent-projects.json');
+}
+
+function normalizeRecentId(filePath) {
+  return String(filePath || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .toLowerCase();
+}
+
+function sortRecentProjects(entries) {
+  return [...entries].sort((a, b) => {
+    const pinDiff = Number(Boolean(b.pinned)) - Number(Boolean(a.pinned));
+    if (pinDiff !== 0) return pinDiff;
+    return (Number(b.lastOpenedAt) || 0) - (Number(a.lastOpenedAt) || 0);
+  });
+}
+
+async function readRecentProjectsRaw() {
+  try {
+    const raw = await fs.promises.readFile(getRecentProjectsFilePath(), 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return sortRecentProjects(
+      parsed.filter(
+        (item) =>
+          item &&
+          typeof item.filePath === 'string' &&
+          item.filePath.trim() &&
+          typeof item.title === 'string'
+      )
+    ).slice(0, 20);
+  } catch {
+    return [];
+  }
+}
+
+async function writeRecentProjectsRaw(entries) {
+  const sorted = sortRecentProjects(entries).slice(0, 20);
+  const filePath = getRecentProjectsFilePath();
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true }).catch(() => {});
+  await writeAtomic(filePath, async (tmpPath) => {
+    await fs.promises.writeFile(tmpPath, JSON.stringify(sorted, null, 2), 'utf8');
+  });
+  return sorted;
+}
+
+async function hydrateRecentProjectsExistence(entries) {
+  return await Promise.all(
+    entries.map(async (item) => {
+      const stat = await fs.promises.stat(item.filePath).catch(() => null);
+      return {
+        ...item,
+        exists: Boolean(stat && stat.isFile()),
+      };
+    })
+  );
 }
 
 async function writeProjectToDisk(targetPath, payload) {
@@ -422,6 +632,10 @@ if (!gotSingleInstanceLock) {
     }
   });
 
+  ipcMain.handle('app:get-version', () => {
+    return app.getVersion();
+  });
+
   ipcMain.handle('app:get-locale', () => {
     return resolveSystemLanguage();
   });
@@ -438,7 +652,7 @@ if (!gotSingleInstanceLock) {
     nativeTheme.themeSource = source;
     const resolved = nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.setBackgroundColor(resolved === 'dark' ? '#09090b' : '#f8f8fa');
+      mainWindow.setBackgroundColor(resolved === 'dark' ? '#0A0A0A' : '#f8f8fa');
     }
     return resolved;
   });
@@ -453,6 +667,84 @@ if (!gotSingleInstanceLock) {
     } catch {
       return null;
     }
+  });
+
+  ipcMain.handle('recent:list', async () => {
+    const entries = await readRecentProjectsRaw();
+    return await hydrateRecentProjectsExistence(entries);
+  });
+
+  ipcMain.handle('recent:upsert', async (_event, entry) => {
+    if (!entry || typeof entry.filePath !== 'string' || !entry.filePath.trim()) {
+      return await hydrateRecentProjectsExistence(await readRecentProjectsRaw());
+    }
+    const resolved = path.resolve(entry.filePath);
+    const id = normalizeRecentId(resolved);
+    const existing = await readRecentProjectsRaw();
+    const prev = existing.find((item) => normalizeRecentId(item.filePath) === id || item.id === id);
+    const nextItem = {
+      id,
+      title: String(entry.title || path.basename(resolved)),
+      filePath: resolved,
+      fileName: String(entry.fileName || path.basename(resolved)),
+      slideCount: Math.max(0, Math.round(Number(entry.slideCount) || 0)),
+      aspectRatio: typeof entry.aspectRatio === 'string' ? entry.aspectRatio : '16:9',
+      lastOpenedAt: Number(entry.lastOpenedAt) || Date.now(),
+      pinned: typeof entry.pinned === 'boolean' ? entry.pinned : Boolean(prev?.pinned),
+      ...(typeof entry.thumbnailDataUrl === 'string' && entry.thumbnailDataUrl.startsWith('data:image/')
+        ? { thumbnailDataUrl: entry.thumbnailDataUrl.slice(0, 180000) }
+        : prev?.thumbnailDataUrl
+          ? { thumbnailDataUrl: prev.thumbnailDataUrl }
+          : {}),
+    };
+    const saved = await writeRecentProjectsRaw([
+      nextItem,
+      ...existing.filter((item) => normalizeRecentId(item.filePath) !== id && item.id !== id),
+    ]);
+    return await hydrateRecentProjectsExistence(saved);
+  });
+
+  ipcMain.handle('recent:toggle-pin', async (_event, filePath) => {
+    if (typeof filePath !== 'string' || !filePath.trim()) {
+      return await hydrateRecentProjectsExistence(await readRecentProjectsRaw());
+    }
+    const id = normalizeRecentId(path.resolve(filePath));
+    const existing = await readRecentProjectsRaw();
+    const updated = existing.map((item) =>
+      normalizeRecentId(item.filePath) === id || item.id === id
+        ? { ...item, pinned: !item.pinned }
+        : item
+    );
+    const saved = await writeRecentProjectsRaw(updated);
+    return await hydrateRecentProjectsExistence(saved);
+  });
+
+  ipcMain.handle('recent:remove', async (_event, filePath) => {
+    if (typeof filePath !== 'string' || !filePath.trim()) {
+      return await hydrateRecentProjectsExistence(await readRecentProjectsRaw());
+    }
+    const id = normalizeRecentId(path.resolve(filePath));
+    const existing = await readRecentProjectsRaw();
+    const saved = await writeRecentProjectsRaw(
+      existing.filter((item) => normalizeRecentId(item.filePath) !== id && item.id !== id)
+    );
+    return await hydrateRecentProjectsExistence(saved);
+  });
+
+  ipcMain.handle('recent:clear', async () => {
+    const existing = await readRecentProjectsRaw();
+    const saved = await writeRecentProjectsRaw(existing.filter((item) => Boolean(item.pinned)));
+    return await hydrateRecentProjectsExistence(saved);
+  });
+
+  ipcMain.handle('recent:reveal', async (_event, filePath) => {
+    if (typeof filePath !== 'string' || !filePath.trim()) return false;
+    const resolved = path.resolve(filePath);
+    if (!isSupportedProjectFile(resolved)) return false;
+    const stat = await fs.promises.stat(resolved).catch(() => null);
+    if (!stat) return false;
+    shell.showItemInFolder(resolved);
+    return true;
   });
 
   ipcMain.handle('project:open-dialog', async () => {
@@ -619,6 +911,31 @@ if (!gotSingleInstanceLock) {
       throw new Error(MENU_TEXT[getActiveLanguage()].invalidSavePath);
     }
     return await openProjectStreaming(resolved);
+  });
+
+  ipcMain.handle('project:open-demo', async () => {
+    const candidates = [
+      process.resourcesPath
+        ? path.join(
+            process.resourcesPath,
+            'app.asar.unpacked',
+            'dist',
+            'demo',
+            'studio-showcase.mpres'
+          )
+        : null,
+      path.join(__dirname, '..', 'dist', 'demo', 'studio-showcase.mpres'),
+      path.join(__dirname, '..', 'public', 'demo', 'studio-showcase.mpres'),
+      path.resolve(__dirname, '..', '..', 'Motion Presentation Studio Demo.mpres'),
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+      const stat = await fs.promises.stat(candidate).catch(() => null);
+      if (stat && stat.isFile()) {
+        return await openProjectStreaming(candidate);
+      }
+    }
+    return null;
   });
 
   ipcMain.handle('media:open-dialog', async () => {
