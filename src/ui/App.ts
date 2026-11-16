@@ -305,6 +305,7 @@ export class MotionPresentationApp {
   private laserPointerEl: HTMLElement | null = null;
   private slideNumberBuffer = '';
   private slideNumberTimer: number | null = null;
+  private toastExitTimer: number | null = null;
   private slideIndicatorEl: HTMLElement | null = null;
   private onPresenterMouseMove: ((e: MouseEvent) => void) | null = null;
   private isModalOpen = false;
@@ -387,6 +388,10 @@ export class MotionPresentationApp {
     if (this.resizeRafId !== null) {
       cancelAnimationFrame(this.resizeRafId);
       this.resizeRafId = null;
+    }
+    if (this.toastExitTimer !== null) {
+      window.clearTimeout(this.toastExitTimer);
+      this.toastExitTimer = null;
     }
     this.activeModalClose?.();
     this.closeStageSettingsPopover();
@@ -4562,23 +4567,40 @@ export class MotionPresentationApp {
     const container = this.root.querySelector('#toast-container') as HTMLElement;
     if (!container) return;
 
-    if (this.layerStack.shouldSuppressToasts()) {
-      container.innerHTML = '';
-      return;
-    }
+    const note = this.layerStack.shouldSuppressToasts() ? null : this.store.getNotification();
+    const existing = container.querySelector('.status-toast') as HTMLElement | null;
 
-    const note = this.store.getNotification();
     if (!note) {
-      container.innerHTML = '';
+      if (existing) {
+        existing.classList.remove('is-visible');
+        if (this.toastExitTimer !== null) window.clearTimeout(this.toastExitTimer);
+        this.toastExitTimer = window.setTimeout(() => {
+          this.toastExitTimer = null;
+          if (!existing.classList.contains('is-visible')) existing.remove();
+        }, 240);
+      }
       return;
     }
 
-    container.innerHTML = `
-      <div class="status-toast ${note.kind}">
-        <span class="status-toast-dot"></span>
-        <span>${this.escapeHtml(note.message)}</span>
-      </div>
-    `;
+    if (this.toastExitTimer !== null) {
+      window.clearTimeout(this.toastExitTimer);
+      this.toastExitTimer = null;
+    }
+
+    let toast = existing;
+    if (!toast) {
+      const el = document.createElement('div');
+      el.className = 'status-toast';
+      el.innerHTML = '<span class="status-toast-dot"></span><span class="status-toast-message"></span>';
+      container.appendChild(el);
+      // Commit the hidden start state so the entrance transitions instead of popping.
+      void el.offsetHeight;
+      toast = el;
+    }
+    toast.classList.remove('info', 'success', 'warning', 'error');
+    toast.classList.add(note.kind, 'is-visible');
+    const messageEl = toast.querySelector('.status-toast-message') as HTMLElement;
+    messageEl.textContent = note.message;
   }
 
   private setupHiddenFileInputs(): void {

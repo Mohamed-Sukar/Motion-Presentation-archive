@@ -185,6 +185,7 @@
 
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
   --duration-fast: 120ms;
   --duration-base: 200ms;
 }
@@ -658,10 +659,6 @@ input[type='range']::-webkit-slider-thumb {
   transition: transform var(--duration-fast) var(--ease-out);
 }
 
-input[type='range']::-webkit-slider-thumb:hover {
-  transform: scale(1.16);
-}
-
 /* =========================================================================
  * 3. SPLIT WORKSPACE: NAVIGATOR / STAGE + DOCK / INSPECTOR
  * ========================================================================= */
@@ -683,7 +680,8 @@ input[type='range']::-webkit-slider-thumb:hover {
   flex-direction: column;
   flex-shrink: 0;
   overflow: hidden;
-  transition: width 180ms var(--ease-out), opacity var(--duration-fast);
+  /* Width is the layout-reflow exception (accordion-style collapse); morph easing. */
+  transition: width var(--duration-base) var(--ease-in-out), opacity var(--duration-fast) var(--ease-standard);
 }
 
 .navigator-pane.collapsed {
@@ -1383,6 +1381,7 @@ input[type='range']::-webkit-slider-thumb:hover {
   border-radius: 50%;
   background: var(--signal-live);
   flex-shrink: 0;
+  transition: background-color var(--duration-fast) var(--ease-standard);
 }
 
 .hud-phase-dot.transitioning {
@@ -1564,7 +1563,7 @@ input[type='range']::-webkit-slider-thumb:hover {
   flex-shrink: 0;
   font-family: inherit;
   font-size: var(--text-2xs);
-  transition: border-color var(--duration-fast), background-color var(--duration-fast);
+  transition: border-color var(--duration-fast) var(--ease-standard), background-color var(--duration-fast) var(--ease-standard);
 }
 
 .dock-seq-node:hover {
@@ -1643,7 +1642,7 @@ input[type='range']::-webkit-slider-thumb:hover {
   flex-direction: column;
   flex-shrink: 0;
   overflow: hidden;
-  transition: width 180ms var(--ease-out), opacity var(--duration-fast);
+  transition: width var(--duration-base) var(--ease-in-out), opacity var(--duration-fast) var(--ease-standard);
 }
 
 .inspector-pane.collapsed {
@@ -1685,7 +1684,7 @@ input[type='range']::-webkit-slider-thumb:hover {
   font-weight: 500;
   border-radius: var(--radius-xs);
   cursor: pointer;
-  transition: background-color var(--duration-fast), color var(--duration-fast);
+  transition: background-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
 }
 
 .segment-btn:hover:not(:disabled):not(.active) {
@@ -1803,7 +1802,7 @@ input[type='range']::-webkit-slider-thumb:hover {
   font-family: inherit;
   font-size: var(--text-xs);
   outline: none;
-  transition: border-color var(--duration-fast);
+  transition: border-color var(--duration-fast) var(--ease-standard);
 }
 
 .input-field:focus,
@@ -1839,7 +1838,7 @@ input[type='range']::-webkit-slider-thumb:hover {
   border-radius: var(--radius-sm);
   border: 1px solid var(--separator);
   background: var(--surface-recessed);
-  transition: border-color var(--duration-fast);
+  transition: border-color var(--duration-fast) var(--ease-standard);
 }
 
 .stage-color-composite:focus-within {
@@ -1910,11 +1909,10 @@ input[type='range']::-webkit-slider-thumb:hover {
   justify-content: center;
   color: #ffffff;
   padding: 0;
-  transition: transform var(--duration-fast) var(--ease-out), border-color var(--duration-fast);
+  transition: transform var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-standard);
 }
 
 .stage-swatch-btn:hover {
-  transform: translateY(-1px);
   border-color: var(--accent);
 }
 
@@ -2028,7 +2026,7 @@ input[type='range']::-webkit-slider-thumb:hover {
   border-radius: var(--radius-pill);
   background: var(--separator-strong);
   opacity: 0;
-  transition: opacity var(--duration-fast);
+  transition: opacity var(--duration-fast) var(--ease-standard);
 }
 
 .pane-resizer:hover::before,
@@ -2059,7 +2057,6 @@ input[type='range']::-webkit-slider-thumb:hover {
   position: fixed;
   bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
   left: 50%;
-  transform: translateX(-50%);
   z-index: 2400;
   padding: 7px var(--space-3-5);
   border-radius: var(--radius-pill);
@@ -2073,6 +2070,17 @@ input[type='range']::-webkit-slider-thumb:hover {
   align-items: center;
   gap: var(--space-2);
   box-shadow: var(--shadow-lg);
+  opacity: 0;
+  transform: translateX(-50%) translateY(10px);
+  pointer-events: none;
+  transition:
+    opacity var(--duration-base) var(--ease-out),
+    transform var(--duration-base) var(--ease-out);
+}
+
+.status-toast.is-visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
   pointer-events: auto;
 }
 
@@ -2128,7 +2136,7 @@ input[type='range']::-webkit-slider-thumb:hover {
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--separator);
   flex-shrink: 0;
-  transition: border-color var(--duration-fast), box-shadow var(--duration-fast);
+  transition: border-color var(--duration-fast) var(--ease-standard), box-shadow var(--duration-fast) var(--ease-standard);
 }
 
 .command-palette-search:focus-within {
@@ -3448,4 +3456,15 @@ input[type='range']::-webkit-slider-thumb:hover {
 
 .window-toolbar[data-toolbar-tier="minimal"] .btn-toolbar.is-compactable .btn-label {
   display: none;
+}
+
+/* Spatial hover feedback only where a real pointer exists (no phantom touch hovers). */
+@media (hover: hover) and (pointer: fine) {
+  .stage-swatch-btn:hover {
+    transform: translateY(-1px);
+  }
+
+  input[type='range']::-webkit-slider-thumb:hover {
+    transform: scale(1.16);
+  }
 }
