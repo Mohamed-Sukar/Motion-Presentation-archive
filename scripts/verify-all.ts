@@ -1671,6 +1671,11 @@ console.log('\n[Test 43] Global Error Handling Suite');
 const { runErrorReportingTests } = await import('../test/error-reporting.test');
 const errorReportingRes = await runSuiteStrict('Global Error Handling', runErrorReportingTests);
 
+// 15. Translation Key Contract Suite (AR/EN symmetry + static & dynamic key usage)
+console.log('\n[Test 44] Translation Key Contract Suite');
+const { runI18nKeyTests } = await import('../test/i18n-keys.test');
+const i18nRes = await runSuiteStrict('Translation Key Contract', runI18nKeyTests);
+
 console.log('[Test 33] MotionReelImporter native /motion-reel metadata & cue mapping');
 {
   const filmJson = JSON.stringify({
@@ -1912,6 +1917,7 @@ console.log(`[Window & Layout] Responsive Layout & Presenter Isolation: ${window
 console.log(`[Unsaved Changes] Dirty State, Quit Guard & Autosave Policy: ${unsavedRes.passed}/${unsavedRes.passed + unsavedRes.failed} Passed`);
 console.log(`[Streaming Assets] Save & Autosave Asset Descriptor Resolver: ${streamAssetsRes.passed}/${streamAssetsRes.passed + streamAssetsRes.failed} Passed`);
 console.log(`[Error Handling] Global Handlers & Crash-Proof Fullscreen Exit: ${errorReportingRes.passed}/${errorReportingRes.passed + errorReportingRes.failed} Passed`);
+console.log(`[i18n] Translation Key Contract (AR/EN symmetry + dynamic keys): ${i18nRes.passed}/${i18nRes.passed + i18nRes.failed} Passed`);
 console.log('------------------------------------------------------');
 console.log(`GRAND TOTAL: ${grandTotalPassed}/${grandTotalTests} Passed (${Math.round((grandTotalPassed / grandTotalTests) * 100)}%)`);
 console.log('======================================================\n');

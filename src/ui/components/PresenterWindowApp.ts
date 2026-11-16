@@ -362,6 +362,8 @@ export class PresenterWindowApp {
     if (api?.requestClosePresenter) {
       api.requestClosePresenter(this.lastSlideIndex);
     } else {
+      // Presenter-window-only fallback: a renderer `window.close()` never reaches the studio's
+      // `close` guard in the main process, so this must never be used to close the studio window.
       window.close();
     }
   }

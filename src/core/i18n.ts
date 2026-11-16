@@ -3,7 +3,7 @@ export type AppLanguage = 'ar' | 'en';
 export const LANGUAGE_STORAGE_KEY = 'motion_presentation_language_v1';
 export const PANEL_WIDTHS_STORAGE_KEY = 'motion_presentation_panel_widths_v1';
 
-const AR_STRINGS = {
+export const AR_STRINGS = {
   // App & Default Titles
   'app.name': 'Motion Presentation Studio',
   'app.titleDefault': 'عرض تفاعلي جديد',
@@ -709,7 +709,7 @@ const AR_STRINGS = {
 
 export type TranslationKey = keyof typeof AR_STRINGS;
 
-const EN_STRINGS: Record<TranslationKey, string> = {
+export const EN_STRINGS: Record<TranslationKey, string> = {
   // App & Default Titles
   'app.name': 'Motion Presentation Studio',
   'app.titleDefault': 'New Motion Presentation',
