@@ -306,6 +306,8 @@ export class MotionPresentationApp {
   private slideNumberBuffer = '';
   private slideNumberTimer: number | null = null;
   private toastExitTimer: number | null = null;
+  private storeUnsubscribe: (() => void) | null = null;
+  private isDisposed = false;
   private slideIndicatorEl: HTMLElement | null = null;
   private onPresenterMouseMove: ((e: MouseEvent) => void) | null = null;
   private isModalOpen = false;
@@ -376,7 +378,7 @@ export class MotionPresentationApp {
     this.bindUnsavedChangesGuard();
     this.bindGlobalErrorHandlers();
     this.bindDesktopProjectOpenEvents();
-    this.store.subscribe((changeType) => this.onStoreUpdated(changeType));
+    this.storeUnsubscribe = this.store.subscribe((changeType) => this.onStoreUpdated(changeType));
     this.onStoreUpdated();
     void this.refreshRecentSessions();
     void this.syncDesktopLanguageAndLocale(initialLang);
@@ -384,13 +386,21 @@ export class MotionPresentationApp {
   }
 
   public dispose(): void {
+    this.isDisposed = true;
+    this.storeUnsubscribe?.();
+    this.storeUnsubscribe = null;
+    this.store.clearNotificationTimer();
     this.clearAutosaveTimer();
     if (this.resizeRafId !== null) {
       cancelAnimationFrame(this.resizeRafId);
       this.resizeRafId = null;
     }
     if (this.toastExitTimer !== null) {
-      window.clearTimeout(this.toastExitTimer);
+      if (typeof window !== 'undefined' && typeof window.clearTimeout === 'function') {
+        window.clearTimeout(this.toastExitTimer);
+      } else {
+        globalThis.clearTimeout(this.toastExitTimer);
+      }
       this.toastExitTimer = null;
     }
     this.activeModalClose?.();
@@ -402,7 +412,7 @@ export class MotionPresentationApp {
     this.rootScope.dispose();
     this.previewEngine?.destroy?.();
     this.presenterEngine?.destroy?.();
-    if (this.isDedicatedPresenterOpen) {
+    if (this.isDedicatedPresenterOpen && typeof window !== 'undefined') {
       void window.desktopAPI?.closePresenterWindow?.();
       this.isDedicatedPresenterOpen = false;
     }
@@ -1469,6 +1479,7 @@ export class MotionPresentationApp {
   }
 
   private async onStoreUpdated(changeType?: StoreChangeType): Promise<void> {
+    if (this.isDisposed) return;
     if (changeType === 'notification') {
       this.renderToast();
       return;
@@ -4564,6 +4575,7 @@ export class MotionPresentationApp {
   }
 
   private renderToast(): void {
+    if (this.isDisposed || typeof window === 'undefined' || typeof document === 'undefined') return;
     const container = this.root.querySelector('#toast-container') as HTMLElement;
     if (!container) return;
 
@@ -4576,7 +4588,7 @@ export class MotionPresentationApp {
         if (this.toastExitTimer !== null) window.clearTimeout(this.toastExitTimer);
         this.toastExitTimer = window.setTimeout(() => {
           this.toastExitTimer = null;
-          if (!existing.classList.contains('is-visible')) existing.remove();
+          if (!this.isDisposed && !existing.classList.contains('is-visible')) existing.remove();
         }, 240);
       }
       return;

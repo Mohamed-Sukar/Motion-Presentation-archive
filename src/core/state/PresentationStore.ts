@@ -97,6 +97,7 @@ export class PresentationStore {
   private listeners = new Set<StoreListener>();
   private commandListeners = new Set<StudioCommandListener>();
   private notification: StoreNotification | null = null;
+  private notifyTimer: number | ReturnType<typeof setTimeout> | null = null;
   private isBatching = false;
   private currentProjectToken: string | null = null;
   /**
@@ -419,20 +420,41 @@ export class PresentationStore {
     }
   }
 
+  clearNotificationTimer(): void {
+    if (this.notifyTimer === null) return;
+    if (typeof window !== 'undefined' && typeof window.clearTimeout === 'function') {
+      window.clearTimeout(this.notifyTimer as number);
+    } else {
+      globalThis.clearTimeout(this.notifyTimer as ReturnType<typeof setTimeout>);
+    }
+    this.notifyTimer = null;
+  }
+
   notify(
     message: string,
     kind: 'info' | 'success' | 'warning' | 'error' = 'info',
     autoClearMs = 4500
   ): void {
+    this.clearNotificationTimer();
     this.notification = { message, kind };
     this.emit('notification');
     if (autoClearMs > 0) {
-      setTimeout(() => {
+      const clearNotification = () => {
+        this.notifyTimer = null;
         if (this.notification?.message === message) {
           this.notification = null;
           this.emit('notification');
         }
-      }, autoClearMs);
+      };
+      if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') {
+        this.notifyTimer = window.setTimeout(clearNotification, autoClearMs);
+      } else {
+        const timer = globalThis.setTimeout(clearNotification, autoClearMs);
+        if (typeof (timer as { unref?: () => void }).unref === 'function') {
+          (timer as { unref: () => void }).unref();
+        }
+        this.notifyTimer = timer;
+      }
     }
   }
 
