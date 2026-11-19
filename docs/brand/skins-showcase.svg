@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="186" viewBox="0 0 960 186" role="img" aria-label="6 Curated Studio Skins — Design System v4.0">
+  <rect width="960" height="186" rx="16" fill="#0A0A0C"/>
+  <rect x="0.75" y="0.75" width="958.5" height="184.5" rx="15.25" fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="1.5"/>
+
+  <g font-family="'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif">
+    <text x="24" y="32" font-size="13" font-weight="700" fill="#FAFAFA">6 Studio Skins · Liquid Glass &amp; Crisp Geometry</text>
+    <text x="936" y="32" text-anchor="end" font-size="12" fill="#A1A1AA">English &amp; Arabic UI (RTL / LTR)</text>
+
+    <!-- 1. Framer Noir -->
+    <g transform="translate(24 50)">
+      <rect width="144" height="114" rx="10" fill="#141416" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <rect x="10" y="10" width="124" height="58" rx="6" fill="#0A0A0A" stroke="#28282C" stroke-width="1"/>
+      <rect x="18" y="20" width="44" height="8" rx="3" fill="#242426"/>
+      <rect x="18" y="34" width="76" height="6" rx="2.5" fill="#1E1E1E"/>
+      <rect x="18" y="47" width="38" height="12" rx="4" fill="#FFFFFF"/>
+      <circle cx="118" cy="24" r="6" fill="#FFFFFF"/>
+      <text x="12" y="88" font-size="12.5" font-weight="700" fill="#FAFAFA">Framer Noir</text>
+      <text x="12" y="103" font-size="10.5" fill="#A1A1AA">Default · Carbon</text>
+    </g>
+
+    <!-- 2. CapCut Teal -->
+    <g transform="translate(178 50)">
+      <rect width="144" height="114" rx="10" fill="#141416" stroke="rgba(255,255,255,0.10)" stroke-width="1"/>
+      <rect x="10" y="10" width="124" height="58" rx="6" fill="#141414" stroke="#363636" stroke-width="1"/>
+      <rect x="18" y="20" width="44" height="8" rx="3" fill="#292828"/>
+      <rect x="18" y="34" width="76" height="6" rx="2.5" fill="#222222"/>
+      <rect x="18" y="47" width="38" height="12" rx="4" fill="#03B9CE"/>
+      <circle cx="118" cy="24" r="6" fill="#03B9CE"/>
+      <text x="12" y="88" font-size="12.5" font-weight="700" fill="#FAFAFA">CapCut Teal</text>
+      <text x="12" y="103" font-size="10.5" fill="#A1A1AA">NLE · Electric Cyan</text>
+    </g>
+
+    <!-- 3. Figma UI3 -->
+    <g transform="translate(332 50)">
+      <rect width="144" height="114" rx="10" fill="#141416" stroke="rgba(255,255,255,0.10)" stroke-width="1"/>
+      <rect x="10" y="10" width="124" height="58" rx="6" fill="#09090B" stroke="#27272A" stroke-width="1"/>
+      <rect x="18" y="20" width="44" height="8" rx="3" fill="#222227"/>
+      <rect x="18" y="34" width="76" height="6" rx="2.5" fill="#18181B"/>
+      <rect x="18" y="47" width="38" height="12" rx="4" fill="#3B82F6"/>
+      <circle cx="118" cy="24" r="6" fill="#3B82F6"/>
+      <text x="12" y="88" font-size="12.5" font-weight="700" fill="#FAFAFA">Figma UI3</text>
+      <text x="12" y="103" font-size="10.5" fill="#A1A1AA">Zinc · Studio Blue</text>
+    </g>
+
+    <!-- 4. Linear Craft -->
+    <g transform="translate(486 50)">
+      <rect width="144" height="114" rx="10" fill="#141416" stroke="rgba(255,255,255,0.10)" stroke-width="1"/>
+      <rect x="10" y="10" width="124" height="58" rx="6" fill="#08090A" stroke="#272730" stroke-width="1"/>
+      <rect x="18" y="20" width="44" height="8" rx="3" fill="#1D1E24"/>
+      <rect x="18" y="34" width="76" height="6" rx="2.5" fill="#16171C"/>
+      <rect x="18" y="47" width="38" height="12" rx="4" fill="#6875E8"/>
+      <circle cx="118" cy="24" r="6" fill="#6875E8"/>
+      <text x="12" y="88" font-size="12.5" font-weight="700" fill="#FAFAFA">Linear Craft</text>
+      <text x="12" y="103" font-size="10.5" fill="#A1A1AA">Obsidian · Indigo</text>
+    </g>
+
+    <!-- 5. DaVinci Neutral -->
+    <g transform="translate(640 50)">
+      <rect width="144" height="114" rx="10" fill="#141416" stroke="rgba(255,255,255,0.10)" stroke-width="1"/>
+      <rect x="10" y="10" width="124" height="58" rx="6" fill="#181818" stroke="#303034" stroke-width="1"/>
+      <rect x="18" y="20" width="44" height="8" rx="3" fill="#2A2A2D"/>
+      <rect x="18" y="34" width="76" height="6" rx="2.5" fill="#222225"/>
+      <rect x="18" y="47" width="38" height="12" rx="4" fill="#4D94CC"/>
+      <circle cx="118" cy="24" r="6" fill="#4D94CC"/>
+      <text x="12" y="88" font-size="12.5" font-weight="700" fill="#FAFAFA">DaVinci Neutral</text>
+      <text x="12" y="103" font-size="10.5" fill="#A1A1AA">Grading Gray</text>
+    </g>
+
+    <!-- 6. Studio Paper Light -->
+    <g transform="translate(794 50)">
+      <rect width="144" height="114" rx="10" fill="#141416" stroke="rgba(255,255,255,0.10)" stroke-width="1"/>
+      <rect x="10" y="10" width="124" height="58" rx="6" fill="#F3F4F6" stroke="#D4D4D8" stroke-width="1"/>
+      <rect x="18" y="20" width="44" height="8" rx="3" fill="#E4E4E7"/>
+      <rect x="18" y="34" width="76" height="6" rx="2.5" fill="#D4D4D8"/>
+      <rect x="18" y="47" width="38" height="12" rx="4" fill="#09090B"/>
+      <circle cx="118" cy="24" r="6" fill="#09090B"/>
+      <text x="12" y="88" font-size="12.5" font-weight="700" fill="#FAFAFA">Studio Paper</text>
+      <text x="12" y="103" font-size="10.5" fill="#A1A1AA">Daylight · Ink</text>
+    </g>
+  </g>
+</svg>

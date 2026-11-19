@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="196" viewBox="0 0 960 196" role="img" aria-label="Three Simple Ways to Build Presentations">
+  <rect width="960" height="196" rx="16" fill="#0A0A0C"/>
+  <rect x="0.75" y="0.75" width="958.5" height="194.5" rx="15.25" fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="1.5"/>
+
+  <!-- Card 1: Create from Scratch -->
+  <g transform="translate(20 20)" font-family="'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif">
+    <rect width="292" height="156" rx="10" fill="#141417" stroke="rgba(255,255,255,0.09)" stroke-width="1"/>
+    <rect x="16" y="16" width="32" height="22" rx="6" fill="#231213" stroke="#FF3D2E" stroke-opacity="0.55" stroke-width="1"/>
+    <text x="32" y="31" text-anchor="middle" font-size="11" font-weight="700" fill="#FF3D2E">01</text>
+    <rect x="56" y="16" width="166" height="22" rx="6" fill="#1E1E24"/>
+    <text x="66" y="30.5" font-size="11" font-weight="600" fill="#D4D4D8">/new-motion-presentation</text>
+    <text x="16" y="64" font-size="16" font-weight="700" fill="#FAFAFA">Start from an Idea</text>
+    <text x="16" y="88" font-size="12.5" fill="#A1A1AA">Give your AI a topic, outline, or link.</text>
+    <text x="16" y="106" font-size="12.5" fill="#A1A1AA">It creates slides, gentle idle loops,</text>
+    <text x="16" y="124" font-size="12.5" fill="#A1A1AA">and transitions ready to drop in.</text>
+    <text x="16" y="144" font-size="11" font-weight="600" fill="#FF3D2E">Topic / Notes  ->  Full Motion Deck</text>
+  </g>
+
+  <!-- Arrow 1 -->
+  <path d="M317 98H329" stroke="rgba(255,255,255,0.22)" stroke-width="1.5" stroke-dasharray="3 3"/>
+
+  <!-- Card 2: Animate Existing Slides -->
+  <g transform="translate(334 20)" font-family="'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif">
+    <rect width="292" height="156" rx="10" fill="#141417" stroke="rgba(255,255,255,0.09)" stroke-width="1"/>
+    <rect x="16" y="16" width="32" height="22" rx="6" fill="#231213" stroke="#FF3D2E" stroke-opacity="0.55" stroke-width="1"/>
+    <text x="32" y="31" text-anchor="middle" font-size="11" font-weight="700" fill="#FF3D2E">02</text>
+    <rect x="56" y="16" width="114" height="22" rx="6" fill="#1E1E24"/>
+    <text x="66" y="30.5" font-size="11" font-weight="600" fill="#D4D4D8">/animate-slides</text>
+    <text x="16" y="64" font-size="16" font-weight="700" fill="#FAFAFA">Animate Your Slides</text>
+    <text x="16" y="88" font-size="12.5" fill="#A1A1AA">Already have slides from Figma or</text>
+    <text x="16" y="106" font-size="12.5" fill="#A1A1AA">PowerPoint? The AI builds custom</text>
+    <text x="16" y="124" font-size="12.5" fill="#A1A1AA">motion transitions between each one.</text>
+    <text x="16" y="144" font-size="11" font-weight="600" fill="#FF3D2E">01.png, 02.png  ->  Living Transitions</text>
+  </g>
+
+  <!-- Arrow 2 -->
+  <path d="M631 98H643" stroke="rgba(255,255,255,0.22)" stroke-width="1.5" stroke-dasharray="3 3"/>
+
+  <!-- Card 3: Video to Slides -->
+  <g transform="translate(648 20)" font-family="'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif">
+    <rect width="292" height="156" rx="10" fill="#141417" stroke="rgba(255,255,255,0.09)" stroke-width="1"/>
+    <rect x="16" y="16" width="32" height="22" rx="6" fill="#231213" stroke="#FF3D2E" stroke-opacity="0.55" stroke-width="1"/>
+    <text x="32" y="31" text-anchor="middle" font-size="11" font-weight="700" fill="#FF3D2E">03</text>
+    <rect x="56" y="16" width="124" height="22" rx="6" fill="#1E1E24"/>
+    <text x="66" y="30.5" font-size="11" font-weight="600" fill="#D4D4D8">Video -&gt; Slides</text>
+    <text x="16" y="64" font-size="16" font-weight="700" fill="#FAFAFA">Drop a Motion Video</text>
+    <text x="16" y="88" font-size="12.5" fill="#A1A1AA">Have one continuous MP4 reel?</text>
+    <text x="16" y="106" font-size="12.5" fill="#A1A1AA">Drop it in, mark where to pause,</text>
+    <text x="16" y="124" font-size="12.5" fill="#A1A1AA">and present it step-by-step live.</text>
+    <text x="16" y="144" font-size="11" font-weight="600" fill="#FF3D2E">1 Video + Cues  ->  Interactive Deck</text>
+  </g>
+</svg>
