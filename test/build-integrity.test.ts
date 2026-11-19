@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { setupMockDOM, teardownMockDOM, MockKeyboardEvent } from './helpers/mock-dom';
+import { setupMockDOM } from './helpers/mock-dom';
 import { ProjectSerializer } from '../src/core/services/ProjectSerializer';
 import { PresentationStore } from '../src/core/state/PresentationStore';
 import { StagePlaybackEngine } from '../src/core/engine/StagePlaybackEngine';
@@ -139,6 +139,45 @@ export async function runBuildIntegrityTests(): Promise<{ passed: number; failed
     assert.throws(() => {
       assert.equal('actual_val', 'expected_val');
     });
+  });
+
+  // T2-F9-06: Offline Typography (no third-party font CDN at runtime)
+  await test('T2-F9-06', 'Studio typography is bundled locally instead of loaded from a font CDN', async () => {
+    const appDir = findAppDir();
+    const indexHtml = fs.readFileSync(path.join(appDir, 'index.html'), 'utf8');
+    assert.equal(
+      /fonts\.googleapis\.com|fonts\.gstatic\.com/.test(indexHtml),
+      false,
+      'index.html must not reference the Google Fonts CDN (offline desktops would lose typography)'
+    );
+
+    const fontsCssPath = path.join(appDir, 'src', 'ui', 'styles', 'fonts.css');
+    assert.ok(fs.existsSync(fontsCssPath), 'src/ui/styles/fonts.css must exist');
+    const fontsCss = fs.readFileSync(fontsCssPath, 'utf8');
+    assert.equal(
+      /fonts\.googleapis\.com|fonts\.gstatic\.com/.test(fontsCss),
+      false,
+      'fonts.css must only reference local ./fonts/*.woff2 files'
+    );
+    assert.ok(fontsCss.includes('@font-face'), 'fonts.css must declare @font-face rules');
+    assert.ok(
+      fontsCss.includes('unicode-range'),
+      'fonts.css must keep unicode-range so Arabic and Latin select the right subsets'
+    );
+
+    const localUrls = [...fontsCss.matchAll(/url\(\.\/fonts\/([^)]+)\)/g)].map((m) => m[1]);
+    assert.ok(localUrls.length > 0, 'fonts.css must point at bundled font files');
+    for (const fileName of new Set(localUrls)) {
+      const fontPath = path.join(appDir, 'src', 'ui', 'styles', 'fonts', fileName);
+      assert.ok(fs.existsSync(fontPath), `Bundled font file is missing: ${fileName}`);
+      assert.ok(fs.statSync(fontPath).size > 0, `Bundled font file is empty: ${fileName}`);
+    }
+
+    const entry = fs.readFileSync(path.join(appDir, 'src', 'main.ts'), 'utf8');
+    assert.ok(
+      entry.includes("./ui/styles/fonts.css"),
+      'src/main.ts must import the bundled font stylesheet'
+    );
   });
 
   console.log(`\nBuild Integrity Suite Summary: ${passed} Passed, ${failed} Failed.`);

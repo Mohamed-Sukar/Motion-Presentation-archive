@@ -8,12 +8,10 @@ import {
   setupMockDOM,
   MockKeyboardEvent,
   MockPointerEvent,
-  MockMouseEvent,
 } from './helpers/mock-dom';
 import {
   makeMockImageAsset,
   makeMockVideoAsset,
-  createDeterministicDeck,
   flushMicrotasks,
 } from './helpers/test-fixtures';
 import { MotionPresentationApp } from '../src/ui/App';
@@ -163,7 +161,7 @@ export async function runE2ERealWorldTests(): Promise<{ passed: number; failed: 
         addBtn?.click();
         await flushMicrotasks();
 
-        let pins = env.root.querySelectorAll('.reel-cue-pin');
+        const pins = env.root.querySelectorAll('.reel-cue-pin');
         assert.equal(pins.length, 4, 'Must have 4 pins: 0, 3.0, 7.0, 12.0');
 
         // 5. Apply reel slicing workflow to commit to store
@@ -261,7 +259,6 @@ export async function runE2ERealWorldTests(): Promise<{ passed: number; failed: 
         await flushMicrotasks();
 
         // 1. Minimum 2-cue protection
-        const modal = env.root.querySelector('.reel-cue-modal');
         const pins = env.root.querySelectorAll('.reel-cue-pin');
         assert.equal(pins.length, 2);
         pins[0].click();

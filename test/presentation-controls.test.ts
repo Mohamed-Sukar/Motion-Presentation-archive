@@ -1725,8 +1725,14 @@ export async function runPresentationControlsTests(): Promise<{ passed: number; 
       const inspResizer = env.root.querySelector('#inspector-resizer') as any;
       assert.ok(splitView && navResizer && inspResizer, 'Split view and both resizer handles must exist');
 
-      assert.equal(splitView.style.getPropertyValue('--navigator-width'), '288px');
-      assert.equal(splitView.style.getPropertyValue('--inspector-width'), '320px');
+      assert.equal(splitView.style.getPropertyValue('--navigator-width'), '264px');
+      assert.equal(splitView.style.getPropertyValue('--inspector-width'), '280px');
+
+      const dock = env.root.querySelector('#studio-timeline-dock') as any;
+      // Switch sequence from default bottom dock to side navigator so navigator-resizer is expanded
+      (env.root.querySelector('#btn-toggle-navigator') as any)?.click();
+      assert.equal(navResizer.classList.contains('collapsed'), false, 'Toggling navigator reveals side navigator resizer');
+      assert.equal(dock.classList.contains('hidden'), true, 'Showing side navigator must hide bottom timeline dock (zero duplication)');
 
       const dragResizer = (handle: any, startX: number, endX: number) => {
         handle.dispatchEvent(new MockPointerEvent('pointerdown', { pointerId: 1, clientX: startX, button: 0 }));
@@ -1736,63 +1742,64 @@ export async function runPresentationControlsTests(): Promise<{ passed: number; 
         assert.equal(splitView.classList.contains('is-resizing'), false, 'pointerup should clear is-resizing');
       };
 
-      // In RTL, navigator is on the right -> dragging left (deltaX = -80) grows width
+      // In RTL, navigator is on the right -> dragging left (deltaX = -80) grows width (264 + 80 = 344)
       dragResizer(navResizer, 500, 420);
-      assert.equal(splitView.style.getPropertyValue('--navigator-width'), '368px');
+      assert.equal(splitView.style.getPropertyValue('--navigator-width'), '344px');
 
-      // Clamping max/min for navigator [200..480]
+      // Clamping max/min for navigator [200..440]
       dragResizer(navResizer, 500, 100);
-      assert.equal(splitView.style.getPropertyValue('--navigator-width'), '480px');
+      assert.equal(splitView.style.getPropertyValue('--navigator-width'), '440px');
       dragResizer(navResizer, 100, 700);
       assert.equal(splitView.style.getPropertyValue('--navigator-width'), '200px');
 
-      // Double-click resets navigator width to default 288px
+      // Double-click resets navigator width to default 264px
       navResizer.dispatchEvent(new MockEvent('dblclick', { bubbles: true }));
-      assert.equal(splitView.style.getPropertyValue('--navigator-width'), '288px');
+      assert.equal(splitView.style.getPropertyValue('--navigator-width'), '264px');
 
-      // In RTL, inspector is on the left -> dragging right (deltaX = +90) grows width to 410px
+      // In RTL, inspector is on the left -> dragging right (deltaX = +90) grows width to 370px
       dragResizer(inspResizer, 300, 390);
-      assert.equal(splitView.style.getPropertyValue('--inspector-width'), '410px');
+      assert.equal(splitView.style.getPropertyValue('--inspector-width'), '370px');
 
-      // Keyboard navigation on inspector resizer (End -> 520px, Home -> 260px, ArrowRight -> +16 in LTR / +16/-16 in RTL)
+      // Keyboard navigation on inspector resizer (End -> 440px, Home -> 240px, ArrowRight -> +16 in LTR / +16 in RTL -> 256px)
       inspResizer.dispatchEvent(new MockKeyboardEvent('keydown', { key: 'End' }));
-      assert.equal(splitView.style.getPropertyValue('--inspector-width'), '520px');
+      assert.equal(splitView.style.getPropertyValue('--inspector-width'), '440px');
       inspResizer.dispatchEvent(new MockKeyboardEvent('keydown', { key: 'Home' }));
-      assert.equal(splitView.style.getPropertyValue('--inspector-width'), '260px');
+      assert.equal(splitView.style.getPropertyValue('--inspector-width'), '240px');
       inspResizer.dispatchEvent(new MockKeyboardEvent('keydown', { key: 'ArrowRight' }));
-      assert.equal(splitView.style.getPropertyValue('--inspector-width'), '276px');
+      assert.equal(splitView.style.getPropertyValue('--inspector-width'), '256px');
 
-      // Collapse behavior hides corresponding resizers
+      // Collapse/switch behavior hides corresponding resizers and keeps single active sequence
       (env.root.querySelector('#btn-toggle-navigator') as any)?.click();
-      assert.equal(navResizer.classList.contains('collapsed'), true, 'Collapsed navigator hides its resizer');
+      assert.equal(navResizer.classList.contains('collapsed'), true, 'Switching back to bottom dock hides navigator resizer');
+      assert.equal(dock.classList.contains('hidden'), false, 'Bottom dock is restored when switching out of side list');
       (env.root.querySelector('#btn-toggle-navigator') as any)?.click();
-      assert.equal(navResizer.classList.contains('collapsed'), false, 'Restoring navigator reveals its resizer');
+      assert.equal(navResizer.classList.contains('collapsed'), false, 'Restoring side navigator reveals its resizer');
 
       (env.root.querySelector('#btn-toggle-inspector') as any)?.click();
       assert.equal(inspResizer.classList.contains('collapsed'), true, 'Collapsed inspector hides its resizer');
       (env.root.querySelector('#btn-toggle-inspector') as any)?.click();
       assert.equal(inspResizer.classList.contains('collapsed'), false);
 
-      // Switch to LTR and verify navigator grows when dragged right (+60px -> 348px)
+      // Switch to LTR and verify navigator grows when dragged right (+60px -> 324px)
       (env.root.querySelector('#btn-lang-toggle') as any)?.click();
       await flushMicrotasks();
       assert.equal(getLanguage(), 'en');
       dragResizer(navResizer, 300, 360);
-      assert.equal(splitView.style.getPropertyValue('--navigator-width'), '348px');
+      assert.equal(splitView.style.getPropertyValue('--navigator-width'), '324px');
 
       // Persistence check across new app mount
       const savedRaw = (globalThis as any).localStorage.getItem(PANEL_WIDTHS_STORAGE_KEY);
       assert.ok(savedRaw, 'Panel widths must be saved to localStorage');
       const saved = JSON.parse(savedRaw);
-      assert.equal(saved.navigatorWidth, 348);
-      assert.equal(saved.inspectorWidth, 276);
+      assert.equal(saved.navigatorWidth, 324);
+      assert.equal(saved.inspectorWidth, 256);
 
       env.root.innerHTML = '';
       new MotionPresentationApp(env.root);
       await flushMicrotasks();
       const splitViewReloaded = env.root.querySelector('.split-view') as any;
-      assert.equal(splitViewReloaded.style.getPropertyValue('--navigator-width'), '348px');
-      assert.equal(splitViewReloaded.style.getPropertyValue('--inspector-width'), '276px');
+      assert.equal(splitViewReloaded.style.getPropertyValue('--navigator-width'), '324px');
+      assert.equal(splitViewReloaded.style.getPropertyValue('--inspector-width'), '256px');
     } finally {
       setLanguage('ar', { persist: false, syncDesktop: false });
       resetI18nStateForTesting();
@@ -1804,7 +1811,7 @@ export async function runPresentationControlsTests(): Promise<{ passed: number; 
   await test('T1-PRO-08', 'Adaptive theme, stage swatches, Command Palette (Ctrl+K), timeline dock & context menu work cleanly', async () => {
     resetI18nStateForTesting();
     resetThemeStateForTesting();
-    const { env, store } = await createTestApp(0);
+    const { env } = await createTestApp(0);
     try {
       setLanguage('en', { persist: false, syncDesktop: false });
       await flushMicrotasks();

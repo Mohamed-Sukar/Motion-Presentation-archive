@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Inspects a frames directory (or list of frame paths) for /create-new:
+ * Inspects a frames directory (or list of frame paths) for /animate-slides:
  * - Filters supported image files (.png, .jpg, .jpeg, .webp, .avif, .svg)
  * - Validates that every filename has an unambiguous ordering number
  * - Checks for missing numbers, ambiguous multiple numbers, duplicates, and < 2 frames

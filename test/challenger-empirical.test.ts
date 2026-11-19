@@ -3,11 +3,10 @@ import {
   setupMockDOM,
   teardownMockDOM,
   parseHTMLToTree,
-  createElementByTag,
   MockHTMLElement,
 } from './helpers/mock-dom';
 import { StagePlaybackEngine } from '../src/core/engine/StagePlaybackEngine';
-import { SlideNode, PresentationSettings } from '../src/core/domain/types';
+import { SlideNode } from '../src/core/domain/types';
 import { createSlideNode, createDefaultSettings } from '../src/core/domain/defaults';
 import { makeMockImageAsset } from './helpers/test-fixtures';
 
@@ -201,14 +200,14 @@ export async function runChallengerStressTests(): Promise<{ passed: number; fail
   });
 
   await runAsyncTest('Mock DOM: RAF cancelAnimationFrame cancels specific timer cleanly', async () => {
-    const env = setupMockDOM();
+    setupMockDOM();
     let firedId1 = false;
     let firedId2 = false;
 
     const id1 = globalThis.requestAnimationFrame(() => {
       firedId1 = true;
     });
-    const id2 = globalThis.requestAnimationFrame(() => {
+    globalThis.requestAnimationFrame(() => {
       firedId2 = true;
     });
 
@@ -403,7 +402,7 @@ export async function runChallengerStressTests(): Promise<{ passed: number; fail
 
   runTest('Mock DOM: Repeated setup and teardown lifecycle resilience', () => {
     // Calling setupMockDOM twice in a row should auto-teardown without leaking
-    const env1 = setupMockDOM();
+    setupMockDOM();
     const env2 = setupMockDOM();
     assert.ok(env2.root);
 

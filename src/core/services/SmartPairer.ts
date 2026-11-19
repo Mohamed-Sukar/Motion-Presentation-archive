@@ -102,9 +102,18 @@ export interface BuildCueSlidesOptions {
   signal?: AbortSignal;
 }
 
+export interface BatchMediaDescriptor {
+  fileName: string;
+  mimeType: string;
+  size: number;
+  path: string;
+  url: string;
+}
+
 export interface BatchProcessOptions {
   onProgress?: (done: number, total: number, fileName: string) => void;
   signal?: AbortSignal;
+  resolveMediaSource?: (file: File) => { path: string; url: string; size?: number } | null;
 }
 
 /**
@@ -145,7 +154,7 @@ export class SmartPairer {
         options.onProgress?.(idx, totalFiles, file.name);
 
         const check = MediaValidator.validateFile(file);
-        if (!check.valid) {
+        if (!check.valid || !check.kind) {
           rejectedFiles.push({
             name: file.name,
             reason: check.errorReason || t('core.invalidFile'),
@@ -154,7 +163,20 @@ export class SmartPairer {
         }
 
         try {
-          const asset = await MediaValidator.ingestFile(file, undefined, options.signal);
+          const resolved = options.resolveMediaSource?.(file) || null;
+          const asset = resolved
+            ? await MediaValidator.ingestFromUrl(
+                resolved.url,
+                check.kind,
+                {
+                  fileName: file.name,
+                  mimeType: file.type || '',
+                  size: resolved.size ?? file.size,
+                  source: { kind: 'file', path: resolved.path },
+                },
+                options.signal
+              )
+            : await MediaValidator.ingestFile(file, undefined, options.signal);
           if (asset.kind === 'image') {
             imageAssets.push(asset);
           } else {
@@ -171,13 +193,134 @@ export class SmartPairer {
 
       options.onProgress?.(totalFiles, totalFiles, '');
 
+      return await this.pairIngestedAssets(
+        imageAssets,
+        videoAssets,
+        rejectedFiles,
+        existingSlidesCount,
+        defaultFallback,
+        options
+      );
+    } catch (err) {
+      cleanupOnAbort();
+      throw err;
+    }
+  }
+
+  /**
+   * Desktop path-based batch import: ingests registered `mpres://file/...` URLs
+   * without reading media bytes into JS memory.
+   */
+  static async processBatchMediaDescriptors(
+    descriptors: BatchMediaDescriptor[],
+    existingSlidesCount: number,
+    defaultFallback: FallbackTransitionStyle = 'crossfade',
+    options: BatchProcessOptions = {}
+  ): Promise<{
+    newSlides: SlideNode[];
+    unpairedVideos: MediaAsset[];
+    report: BatchImportReport;
+  }> {
+    MediaValidator.throwIfAborted(options.signal);
+
+    const sorted = [...descriptors].sort((a, b) =>
+      naturalCollator.compare(a.fileName, b.fileName)
+    );
+
+    const imageAssets: MediaAsset[] = [];
+    const videoAssets: MediaAsset[] = [];
+    const rejectedFiles: Array<{ name: string; reason: string }> = [];
+    const totalFiles = sorted.length;
+
+    const cleanupOnAbort = () => {
+      for (const a of imageAssets) MediaValidator.revokeAssetUrls(a);
+      for (const a of videoAssets) MediaValidator.revokeAssetUrls(a);
+    };
+
+    try {
+      for (let idx = 0; idx < sorted.length; idx++) {
+        MediaValidator.throwIfAborted(options.signal);
+        const desc = sorted[idx];
+        options.onProgress?.(idx, totalFiles, desc.fileName);
+
+        const check = MediaValidator.validateDescriptor(desc.fileName, desc.mimeType, desc.size);
+        if (!check.valid || !check.kind) {
+          rejectedFiles.push({
+            name: desc.fileName,
+            reason: check.errorReason || t('core.invalidFile'),
+          });
+          continue;
+        }
+
+        try {
+          const asset = await MediaValidator.ingestFromUrl(
+            desc.url,
+            check.kind,
+            {
+              fileName: desc.fileName,
+              mimeType: desc.mimeType,
+              size: desc.size,
+              source: { kind: 'file', path: desc.path },
+            },
+            options.signal
+          );
+          if (asset.kind === 'image') {
+            imageAssets.push(asset);
+          } else {
+            videoAssets.push(asset);
+          }
+        } catch (err) {
+          if (MediaValidator.isAbortError(err)) throw err;
+          rejectedFiles.push({
+            name: desc.fileName,
+            reason: err instanceof Error ? err.message : t('core.fileReadError'),
+          });
+        }
+      }
+
+      options.onProgress?.(totalFiles, totalFiles, '');
+
+      return await this.pairIngestedAssets(
+        imageAssets,
+        videoAssets,
+        rejectedFiles,
+        existingSlidesCount,
+        defaultFallback,
+        options
+      );
+    } catch (err) {
+      cleanupOnAbort();
+      throw err;
+    }
+  }
+
+  private static async pairIngestedAssets(
+    imageAssets: MediaAsset[],
+    videoAssets: MediaAsset[],
+    rejectedFiles: Array<{ name: string; reason: string }>,
+    existingSlidesCount: number,
+    defaultFallback: FallbackTransitionStyle,
+    options: BatchProcessOptions
+  ): Promise<{
+    newSlides: SlideNode[];
+    unpairedVideos: MediaAsset[];
+    report: BatchImportReport;
+  }> {
+
       const newSlides: SlideNode[] = [];
       const unpairedVideos: MediaAsset[] = [];
       let transitionsMatched = 0;
 
       // Case A: Mixed Images + Videos, or Images only
       if (imageAssets.length > 0) {
-        const usedVideoIndices = new Set<number>();
+        const idleLoopVideos = videoAssets.filter((v) =>
+          SmartPairer.isIdleLoopFilename(v.name)
+        );
+        const transitionVideos = videoAssets.filter(
+          (v) => !SmartPairer.isIdleLoopFilename(v.name)
+        );
+        const usedTransIndices = new Set<number>();
+        const usedLoopIndices = new Set<number>();
 
         for (let i = 0; i < imageAssets.length; i++) {
           MediaValidator.throwIfAborted(options.signal);
@@ -188,11 +331,32 @@ export class SmartPairer {
           );
 
           const imageParsedIdx = SmartPairer.extractSlideIndexFromFilename(imageAssets[i].name);
-          let matchedVidIdx = -1;
 
-          for (let v = 0; v < videoAssets.length; v++) {
-            if (usedVideoIndices.has(v)) continue;
-            const vidTarget = SmartPairer.extractSlideIndexFromFilename(videoAssets[v].name);
+          // Match Idle Loop video (e.g., 01_loop.mp4, 02_idle.mp4)
+          let matchedLoopIdx = -1;
+          for (let l = 0; l < idleLoopVideos.length; l++) {
+            if (usedLoopIndices.has(l)) continue;
+            const loopTarget = SmartPairer.extractIdleLoopSlideIndex(idleLoopVideos[l].name);
+            if (
+              loopTarget !== null &&
+              (loopTarget === imageParsedIdx ||
+                loopTarget === i ||
+                loopTarget === existingSlidesCount + i)
+            ) {
+              matchedLoopIdx = l;
+              break;
+            }
+          }
+          if (matchedLoopIdx !== -1) {
+            usedLoopIndices.add(matchedLoopIdx);
+            slideNode.idleLoopAsset = idleLoopVideos[matchedLoopIdx];
+          }
+
+          // Match Slide-to-Slide Transition video (e.g., 01-02_transition.mp4)
+          let matchedVidIdx = -1;
+          for (let v = 0; v < transitionVideos.length; v++) {
+            if (usedTransIndices.has(v)) continue;
+            const vidTarget = SmartPairer.extractSlideIndexFromFilename(transitionVideos[v].name);
             if (
               vidTarget !== null &&
               (vidTarget === imageParsedIdx ||
@@ -205,8 +369,8 @@ export class SmartPairer {
           }
 
           if (matchedVidIdx === -1) {
-            for (let v = 0; v < videoAssets.length; v++) {
-              if (!usedVideoIndices.has(v)) {
+            for (let v = 0; v < transitionVideos.length; v++) {
+              if (!usedTransIndices.has(v)) {
                 matchedVidIdx = v;
                 break;
               }
@@ -214,17 +378,22 @@ export class SmartPairer {
           }
 
           if (matchedVidIdx !== -1) {
-            usedVideoIndices.add(matchedVidIdx);
-            slideNode.transitionToNext.videoAsset = videoAssets[matchedVidIdx];
+            usedTransIndices.add(matchedVidIdx);
+            slideNode.transitionToNext.videoAsset = transitionVideos[matchedVidIdx];
             transitionsMatched++;
           }
 
           newSlides.push(slideNode);
         }
 
-        for (let v = 0; v < videoAssets.length; v++) {
-          if (!usedVideoIndices.has(v)) {
-            unpairedVideos.push(videoAssets[v]);
+        for (let v = 0; v < transitionVideos.length; v++) {
+          if (!usedTransIndices.has(v)) {
+            unpairedVideos.push(transitionVideos[v]);
+          }
+        }
+        for (let l = 0; l < idleLoopVideos.length; l++) {
+          if (!usedLoopIndices.has(l)) {
+            unpairedVideos.push(idleLoopVideos[l]);
           }
         }
       }
@@ -392,10 +561,6 @@ export class SmartPairer {
           rejectedFiles,
         },
       };
-    } catch (err) {
-      cleanupOnAbort();
-      throw err;
-    }
   }
 
   static parseIndicesFromFilename(name: string): { fromIndex: number; toIndex?: number } | null {
@@ -450,6 +615,33 @@ export class SmartPairer {
   static extractSlideIndexFromFilename(name: string): number | null {
     const parsed = SmartPairer.parseIndicesFromFilename(name);
     return parsed ? parsed.fromIndex : null;
+  }
+
+  static isIdleLoopFilename(name: string): boolean {
+    const stem = name.replace(/\.[^/.]+$/, '');
+    if (!/(?:^|[_\-\s.])(?:loop|idle)(?:[_\-\s.]|$)/i.test(stem)) {
+      return false;
+    }
+    if (/(?:_to_|-to-|\s+to\s+)/i.test(stem)) {
+      return false;
+    }
+    const sanitized = stem
+      .replace(/([_\-\s.]|^)\d{3,4}x\d{3,4}(?=[_\-\s.]|$)/gi, '$1')
+      .replace(/([_\-\s.]|^)(?:2160|1440|1080|720|540|480|360|240)p(?=[_\-\s.]|$)/gi, '$1')
+      .replace(/([_\-\s.]|^)(?:24|25|30|48|50|60|120|240)fps(?=[_\-\s.]|$)/gi, '$1')
+      .replace(/([_\-\s.]|^)(?:4k|8k|2k)(?=[_\-\s.]|$)/gi, '$1');
+    const pairMatch = sanitized.match(/(?:^|[^\d])(\d+)\s*[-_]\s*(\d+)(?:$|[^\d])/);
+    if (pairMatch) {
+      const a = parseInt(pairMatch[1], 10);
+      const b = parseInt(pairMatch[2], 10);
+      if (!isResolutionPair(a, b)) return false;
+    }
+    return true;
+  }
+
+  static extractIdleLoopSlideIndex(name: string): number | null {
+    if (!SmartPairer.isIdleLoopFilename(name)) return null;
+    return SmartPairer.extractSlideIndexFromFilename(name);
   }
 
   static normalizeCuePoints(cueTimesSec: number[], durationSec: number): number[] {
@@ -1381,7 +1573,6 @@ function analyzeMotionCurve(
 
     if (bestVel === Infinity) {
       bestIdx = plateau.rawStartIdx;
-      bestSharp = signatures?.[bestIdx]?.meanEdgeSharpness ?? 0;
     }
 
     const cueTime = Number(Math.min(durationSec, sampleTimes[bestIdx]).toFixed(2));

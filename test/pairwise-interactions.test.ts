@@ -4,7 +4,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { setupMockDOM, MockKeyboardEvent, MockPointerEvent, MockMouseEvent } from './helpers/mock-dom';
+import { setupMockDOM, MockKeyboardEvent, MockPointerEvent } from './helpers/mock-dom';
 import { makeMockImageAsset, makeMockVideoAsset, flushMicrotasks } from './helpers/test-fixtures';
 import { MotionPresentationApp } from '../src/ui/App';
 import { StagePlaybackEngine } from '../src/core/engine/StagePlaybackEngine';
@@ -70,14 +70,14 @@ export async function runPairwiseInteractionTests(): Promise<{ passed: number; f
     return st.currentSlideIndex;
   };
 
-  const exitFullscreen = async (env: any, app: any) => {
+  const exitFullscreen = async (env: any, _app: any) => {
     env.window.dispatchEvent(new MockKeyboardEvent('keydown', { key: 'Escape' }));
     await flushMicrotasks();
   };
 
   // T3-PAIR-01: F1 (Shortcuts) × F5/F6 (Timeline Modal)
   await test('T3-PAIR-01', 'Presentation shortcuts do not leak to background engine while timeline modal is open', async () => {
-    const { env, app, store } = await createStudioWithSlides(4);
+    const { env, app } = await createStudioWithSlides(4);
     try {
       const previewEngine = (app as any).previewEngine as StagePlaybackEngine;
       assert.equal(previewEngine.getStatus().currentSlideIndex, 0);

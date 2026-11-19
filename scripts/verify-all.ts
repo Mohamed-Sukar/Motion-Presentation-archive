@@ -14,6 +14,7 @@ process.on('uncaughtException', (err) => {
 });
 
 import { SmartPairer, extractFrameSignature, compareFrameSignatures } from '../src/core/services/SmartPairer';
+import { MotionReelImporter } from '../src/core/services/MotionReelImporter';
 import { MediaValidator } from '../src/core/services/MediaValidator';
 import { ProjectSerializer } from '../src/core/services/ProjectSerializer';
 import {
@@ -1550,7 +1551,7 @@ console.log('[Test 28d] SmartPairer.analyzeMotionSignals perceptual content dedu
 console.log('\n--- RUNNING 4-TIER E2E TEST SUITES (F1-F9) ---');
 
 let totalE2EPassed = 0;
-let totalE2EFailed = 0;
+const totalE2EFailed = 0;
 
 /**
  * Executes an asynchronous test suite with strict assertion and integrity checks.
@@ -1617,19 +1618,306 @@ console.log('\n[Test 32] Real-World End-to-End Scenarios Suite (Tier 4)');
 const { runE2ERealWorldTests } = await import('../test/e2e-realworld.test');
 const scenRes = await runSuiteStrict('Real-World Scenarios', runE2ERealWorldTests);
 
-const legacyPassed = 31;
+// 6. Phase 0: Bundle Compatibility & Legacy Fixture Suite
+console.log('\n[Test 33b] Bundle Compatibility & Legacy Fixtures Suite (Phase 0)');
+const { runBundleCompatTests } = await import('../test/bundle-compat.test');
+const compatRes = await runSuiteStrict('Bundle Compatibility (Phase 0)', runBundleCompatTests);
+
+// 7. Phase 1: Atomic Writes, Path Registry & Streaming Bundle Suite
+console.log('\n[Test 34] Atomic Write & Backup Suite (Phase 1)');
+const { runAtomicWriteTests } = await import('../test/atomic-write.test');
+const atomicRes = await runSuiteStrict('Atomic Writes (Phase 1)', runAtomicWriteTests);
+
+console.log('\n[Test 35] Path Registry Security Suite (Phase 1)');
+const { runPathRegistryTests } = await import('../test/path-registry.test');
+const regRes = await runSuiteStrict('Path Registry (Phase 1)', runPathRegistryTests);
+
+console.log('\n[Test 36] Streaming ZIP & mpres:// Protocol Suite (Phase 1)');
+const { runBundleStreamTests } = await import('../test/bundle-stream.test');
+const streamRes = await runSuiteStrict('Streaming ZIP & Protocol (Phase 1)', runBundleStreamTests);
+
+// 8. Phase 2: Memory & Resource Budget Governance Suite
+console.log('\n[Test 37] Memory & Resource Budget Suite (Phase 2)');
+const { runMemoryBudgetTests } = await import('../test/memory-budget.test');
+const memRes = await runSuiteStrict('Memory & Resource Budget (Phase 2)', runMemoryBudgetTests);
+
+// 9. Phase 3: UI Components & Lifecycle Suite
+console.log('\n[Test 38] UI Components & Lifecycle Suite (Phase 3)');
+const { runUiComponentsTests } = await import('../test/ui-components.test');
+const uiCompRes = await runSuiteStrict('UI Components & Lifecycle (Phase 3)', runUiComponentsTests);
+
+// 10. Phase 4: Store Slices & Typed Commands Suite
+console.log('\n[Test 39] Store Slices & Typed Commands Suite (Phase 4)');
+const { runStoreCommandsTests } = await import('../test/store-commands.test');
+const storeCmdRes = await runSuiteStrict('Store Slices & Typed Commands (Phase 4)', runStoreCommandsTests);
+
+// 11. Window, Responsive Layout & Presenter Isolation Suite
+console.log('\n[Test 40] Window, Layout & Presenter Isolation Suite');
+const { runWindowLayoutTests } = await import('../test/window-layout.test');
+const windowLayoutRes = await runSuiteStrict('Window, Layout & Presenter Isolation', runWindowLayoutTests);
+
+// 12. Unsaved Changes, Dirty State & Quit Guard Suite
+console.log('\n[Test 41] Unsaved Changes & Quit Guard Suite');
+const { runUnsavedChangesTests } = await import('../test/unsaved-changes.test');
+const unsavedRes = await runSuiteStrict('Unsaved Changes & Quit Guard', runUnsavedChangesTests);
+
+// 13. Streaming Asset Descriptor Resolver Suite (shared by manual save and autosave)
+console.log('\n[Test 42] Streaming Asset Resolver Suite');
+const { runStreamingAssetsTests } = await import('../test/streaming-assets.test');
+const streamAssetsRes = await runSuiteStrict('Streaming Asset Resolver', runStreamingAssetsTests);
+
+// 14. Global Error Handling & Crash-Proof Fullscreen Exit Suite
+console.log('\n[Test 43] Global Error Handling Suite');
+const { runErrorReportingTests } = await import('../test/error-reporting.test');
+const errorReportingRes = await runSuiteStrict('Global Error Handling', runErrorReportingTests);
+
+// 15. Translation Key Contract Suite (AR/EN symmetry + static & dynamic key usage)
+console.log('\n[Test 44] Translation Key Contract Suite');
+const { runI18nKeyTests } = await import('../test/i18n-keys.test');
+const i18nRes = await runSuiteStrict('Translation Key Contract', runI18nKeyTests);
+
+console.log('[Test 33] MotionReelImporter native /motion-reel metadata & cue mapping');
+{
+  const filmJson = JSON.stringify({
+    title: 'Launch Reel 2026',
+    duration: 15,
+    formats: ['16x9', '9x16'],
+    poster: 4.5,
+  });
+  const beatsJson = JSON.stringify({
+    bpm: 120,
+    offset: 0,
+    period: 0.5,
+    beats: [0, 0.5, 1.0, 1.5, 2.0],
+    sections: [
+      { name: 'Intro', beat: 0 },
+      { name: 'Hook', beat: 8 },
+      { name: 'Drop', beat: 16 },
+    ],
+  });
+  const hitsJson = JSON.stringify([
+    { beat: 4, label: 'Logo Pop', sfx: 'whoosh' },
+    { beat: 12, t: 6.0, label: 'Metric Reveal', sfx: 'impact' },
+  ]);
+
+  const parsed = MotionReelImporter.parseFromTexts({
+    filmJsonText: filmJson,
+    beatsJsonText: beatsJson,
+    hitsJsonText: hitsJson,
+    videoFileNames: ['video_16x9.mp4', 'final_9x16.mp4', 'final.mp4'],
+  });
+
+  assert.equal(parsed.title, 'Launch Reel 2026');
+  assert.equal(parsed.durationSec, 15);
+  assert.equal(parsed.suggestedAspectRatio, '16:9');
+  assert.equal(parsed.bpm, 120);
+  assert.equal(parsed.preferredVideoName, 'final.mp4');
+  assert.deepEqual(parsed.sectionCues, [
+    { timeSec: 0, label: 'Intro' },
+    { timeSec: 4, label: 'Hook' },
+    { timeSec: 8, label: 'Drop' },
+  ]);
+  assert.deepEqual(parsed.hitCues, [
+    { timeSec: 2, label: 'Logo Pop' },
+    { timeSec: 6, label: 'Metric Reveal' },
+  ]);
+  assert.deepEqual(parsed.recommendedCuePointsSec, [0, 4, 8, 15]);
+  assert.deepEqual(parsed.recommendedCueLabels, ['Intro', 'Hook', 'Drop', 'End']);
+
+  // Format mapping & malformed JSON resilience
+  assert.equal(MotionReelImporter.formatToAspectRatio('9x16'), '9:16');
+  assert.equal(MotionReelImporter.pickPreferredVideoName(['final_9x16.mp4', 'video_9x16.mp4'], '9x16'), 'final_9x16.mp4');
+  const broken = MotionReelImporter.parseFromTexts({
+    filmJsonText: '{broken-json',
+    beatsJsonText: null,
+    hitsJsonText: '[]',
+    videoFileNames: ['out.mp4'],
+  });
+  assert.equal(broken.title, null);
+  assert.equal(broken.preferredVideoName, 'out.mp4');
+  console.log('✓ MotionReelImporter native /motion-reel metadata & cue mapping passed');
+}
+
+console.log('[Test 34] Idle Loop Pairing, Presentation Manifest, Surgical AI Prompt & Serializer v1.2.0 Roundtrip');
+{
+  // 1. Idle loop filename detection & index extraction
+  assert.equal(SmartPairer.isIdleLoopFilename('01_loop.mp4'), true);
+  assert.equal(SmartPairer.isIdleLoopFilename('02_idle.mp4'), true);
+  assert.equal(SmartPairer.isIdleLoopFilename('slide_03_loop.mp4'), true);
+  assert.equal(SmartPairer.isIdleLoopFilename('loop_04.mp4'), true);
+  assert.equal(SmartPairer.isIdleLoopFilename('01-02_transition.mp4'), false);
+  assert.equal(SmartPairer.isIdleLoopFilename('02_to_03_loop.mp4'), false);
+  assert.equal(SmartPairer.extractIdleLoopSlideIndex('01_loop.mp4'), 0);
+  assert.equal(SmartPairer.extractIdleLoopSlideIndex('03_idle.mp4'), 2);
+  assert.equal(SmartPairer.extractIdleLoopSlideIndex('01-02_transition.mp4'), null);
+
+  // 2. presentation.json manifest parsing & slide enrichment
+  const manifestJson = JSON.stringify({
+    skill: 'new-motion-presentation',
+    title: 'AI Deck 2026',
+    aspectRatio: '16:9',
+    projectRootPath: 'E:\\Projects\\ai-deck',
+    outputDirPath: 'E:\\Projects\\ai-deck\\out\\presentation',
+    creativeDirection: 'Isometric 3D Flow',
+    slides: [
+      {
+        index: 1,
+        title: 'Opening Hook',
+        notes: 'Introduce core thesis',
+        frameFile: '01_frame.png',
+        idleLoopFile: '01_loop.mp4',
+        transitionVideoFile: '01-02_transition.mp4',
+        slideCodeFile: 'scenes/slide_01.js',
+        idleLoopCodeFile: 'loops/loop_01.js',
+        transitionCodeFile: 'transitions/t01_02/film.js',
+        exitPointsSec: [0, 1.5, 3.0],
+      },
+      {
+        index: 2,
+        title: 'Architecture Flow',
+        frameFile: '02_frame.png',
+        slideCodeFile: 'scenes/slide_02.js',
+      },
+    ],
+  });
+  const parsedManifest = MotionReelImporter.parsePresentationManifest(manifestJson);
+  assert.ok(parsedManifest);
+
+  const mkImg = (id: string, name: string): MediaAsset => ({
+    id,
+    name,
+    kind: 'image',
+    mimeType: 'image/png',
+    extension: 'png',
+    objectUrl: `data:image/png;base64,AA==`,
+    fileSize: 64,
+    width: 1920,
+    height: 1080,
+    durationSec: 0,
+    thumbnailUrl: `data:image/png;base64,AA==`,
+  });
+  const mkVid = (id: string, name: string, dur = 3.0): MediaAsset => ({
+    id,
+    name,
+    kind: 'video',
+    mimeType: 'video/mp4',
+    extension: 'mp4',
+    objectUrl: `blob:test/${id}`,
+    fileSize: 1024,
+    width: 1920,
+    height: 1080,
+    durationSec: dur,
+    thumbnailUrl: '',
+  });
+
+  const s1 = createSlideNode(mkImg('img_1', '01_frame.png'), 0);
+  s1.idleLoopAsset = mkVid('loop_1', '01_loop.mp4', 3.0);
+  s1.transitionToNext.videoAsset = mkVid('tr_12', '01-02_transition.mp4', 1.8);
+  const s2 = createSlideNode(mkImg('img_2', '02_frame.png'), 1);
+
+  const aiMeta = MotionReelImporter.applyPresentationManifestToSlides([s1, s2], parsedManifest);
+  assert.equal(aiMeta.skillName, 'new-motion-presentation');
+  assert.equal(aiMeta.projectRootPath, 'E:\\Projects\\ai-deck');
+  assert.equal(s1.title, 'Opening Hook');
+  assert.equal(s1.notes, 'Introduce core thesis');
+  assert.equal(s1.sourceMeta?.slideCodeFile, 'scenes/slide_01.js');
+  assert.deepEqual(s1.sourceMeta?.exitPointsSec, [0, 1.5, 3.0]);
+
+  // 3. Surgical AI Edit Prompt Builder
+  const promptEn = MotionReelImporter.buildSurgicalEditPrompt({
+    skillName: 'new-motion-presentation',
+    projectRootPath: 'E:\\Projects\\ai-deck',
+    outputDirPath: 'E:\\Projects\\ai-deck\\out\\presentation',
+    scope: 'slide',
+    slideIndex: 1,
+    totalSlides: 3,
+    slideTitle: 'Opening Hook',
+    hasIdleLoop: true,
+    sourceMeta: s1.sourceMeta,
+    userInstruction: 'Make the headline 20% larger and boost card glow',
+    language: 'en',
+  });
+  assert.ok(promptEn.includes('/new-motion-presentation'));
+  assert.ok(promptEn.includes('E:\\Projects\\ai-deck'));
+  assert.ok(promptEn.includes('scenes/slide_01.js'));
+  assert.ok(promptEn.includes('01_loop.mp4'));
+  assert.ok(promptEn.includes('01-02_transition.mp4'));
+  assert.ok(promptEn.includes('Make the headline 20% larger and boost card glow'));
+  assert.ok(promptEn.includes('#2, #3'));
+
+  const promptAnimate = MotionReelImporter.buildSurgicalEditPrompt({
+    skillName: 'animate-slides',
+    projectRootPath: 'E:\\Projects\\slides-deck',
+    outputDirPath: 'E:\\Projects\\slides-deck\\out\\presentation',
+    scope: 'slide',
+    slideIndex: 1,
+    totalSlides: 2,
+    slideTitle: 'Slide 1',
+    hasIdleLoop: false,
+    userInstruction: 'Polish transition',
+    language: 'en',
+  });
+  assert.ok(promptAnimate.includes('/animate-slides'));
+
+  const promptLegacy = MotionReelImporter.buildSurgicalEditPrompt({
+    skillName: 'create-new',
+    projectRootPath: 'E:\\Projects\\legacy-deck',
+    outputDirPath: 'E:\\Projects\\legacy-deck\\out\\presentation',
+    scope: 'slide',
+    slideIndex: 1,
+    totalSlides: 2,
+    slideTitle: 'Slide 1',
+    hasIdleLoop: false,
+    userInstruction: 'Polish transition',
+    language: 'en',
+  });
+  assert.ok(promptLegacy.includes('/animate-slides'));
+
+  // 4. ProjectSerializer v1.2.0 manifest roundtrip with idleLoopAsset + aiSourceMeta + sourceMeta
+  const proj = createEmptyProject('AI Deck 2026');
+  proj.aiSourceMeta = aiMeta;
+  proj.slides = [s1, s2];
+  const manifestObj = ProjectSerializer.buildManifestObject(proj);
+  assert.equal(manifestObj.version, '1.2.0');
+  const deserialized = ProjectSerializer.deserializeProject(JSON.stringify(manifestObj));
+  assert.equal(deserialized.aiSourceMeta?.projectRootPath, 'E:\\Projects\\ai-deck');
+  assert.equal(deserialized.slidesData[0].idleLoopFileName, '01_loop.mp4');
+  assert.equal(deserialized.slidesData[0].sourceMeta?.idleLoopCodeFile, 'loops/loop_01.js');
+
+  const store = new PresentationStore();
+  store.loadProjectFromManifest(deserialized);
+  const loadedSlides = store.getSlides();
+  assert.equal(store.getProjectAiSourceMeta()?.creativeDirection, 'Isometric 3D Flow');
+  assert.equal(loadedSlides[0].expectedIdleLoopFileName, '01_loop.mp4');
+  assert.equal(loadedSlides[0].sourceMeta?.slideCodeFile, 'scenes/slide_01.js');
+  console.log('✓ Idle Loop pairing, presentation.json, surgical prompt & v1.2.0 roundtrip passed');
+}
+
+const legacyPassed = 33;
 const grandTotalPassed = legacyPassed + totalE2EPassed;
 const grandTotalTests = legacyPassed + totalE2EPassed + totalE2EFailed;
 
 console.log('\n======================================================');
 console.log('             COMPREHENSIVE TEST SUITE SUMMARY          ');
 console.log('======================================================');
-console.log(`[Legacy] Verification Suite: ${legacyPassed}/31 Passed`);
+console.log(`[Legacy] Verification Suite: ${legacyPassed}/33 Passed`);
 console.log(`[Tier 1 & 2] Presentation Controls (F1-F4): ${presRes.passed}/${presRes.passed + presRes.failed} Passed`);
 console.log(`[Tier 1 & 2] Keyframe Timeline (F5-F8): ${timeRes.passed}/${timeRes.passed + timeRes.failed} Passed`);
 console.log(`[Tier 1 & 2] Build Integrity (F9): ${buildRes.passed}/${buildRes.passed + buildRes.failed} Passed`);
 console.log(`[Tier 3] Pairwise Interactions: ${pairRes.passed}/${pairRes.passed + pairRes.failed} Passed`);
 console.log(`[Tier 4] Real-World Scenarios: ${scenRes.passed}/${scenRes.passed + scenRes.failed} Passed`);
+console.log(`[Phase 0] Bundle Compatibility: ${compatRes.passed}/${compatRes.passed + compatRes.failed} Passed`);
+console.log(`[Phase 1] Atomic Writes: ${atomicRes.passed}/${atomicRes.passed + atomicRes.failed} Passed`);
+console.log(`[Phase 1] Path Registry: ${regRes.passed}/${regRes.passed + regRes.failed} Passed`);
+console.log(`[Phase 1] Streaming ZIP & Protocol: ${streamRes.passed}/${streamRes.passed + streamRes.failed} Passed`);
+console.log(`[Phase 2] Memory & Resource Budget: ${memRes.passed}/${memRes.passed + memRes.failed} Passed`);
+console.log(`[Phase 3] UI Components & Lifecycle: ${uiCompRes.passed}/${uiCompRes.passed + uiCompRes.failed} Passed`);
+console.log(`[Phase 4] Store Slices & Typed Commands: ${storeCmdRes.passed}/${storeCmdRes.passed + storeCmdRes.failed} Passed`);
+console.log(`[Window & Layout] Responsive Layout & Presenter Isolation: ${windowLayoutRes.passed}/${windowLayoutRes.passed + windowLayoutRes.failed} Passed`);
+console.log(`[Unsaved Changes] Dirty State, Quit Guard & Autosave Policy: ${unsavedRes.passed}/${unsavedRes.passed + unsavedRes.failed} Passed`);
+console.log(`[Streaming Assets] Save & Autosave Asset Descriptor Resolver: ${streamAssetsRes.passed}/${streamAssetsRes.passed + streamAssetsRes.failed} Passed`);
+console.log(`[Error Handling] Global Handlers & Crash-Proof Fullscreen Exit: ${errorReportingRes.passed}/${errorReportingRes.passed + errorReportingRes.failed} Passed`);
+console.log(`[i18n] Translation Key Contract (AR/EN symmetry + dynamic keys): ${i18nRes.passed}/${i18nRes.passed + i18nRes.failed} Passed`);
 console.log('------------------------------------------------------');
 console.log(`GRAND TOTAL: ${grandTotalPassed}/${grandTotalTests} Passed (${Math.round((grandTotalPassed / grandTotalTests) * 100)}%)`);
 console.log('======================================================\n');

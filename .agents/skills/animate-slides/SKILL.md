@@ -1,15 +1,19 @@
 ---
-name: create-new
+name: animate-slides
 description: >-
   Project-specific workflow for turning an ordered folder of presentation frames
   into 2D-code-drawn canvases and animated frame-to-frame motion transition videos
-  using the motion-reel skill. Use when the user invokes /create-new or asks to
-  create a new motion presentation or transition sequence from ordered frame images.
+  using the motion-reel skill. Use when the user invokes /animate-slides or asks to
+  create motion transitions between existing slide frames.
 ---
 
-# Create New Motion Presentation (`/create-new`)
+# Animate Slides (`/animate-slides`)
 
 Turn a sequence of user-provided keyframe images into faithful **2D-code-drawings** and choreograph smooth, expressive **motion transition videos** between every consecutive frame (`Frame i -> Frame i+1`) using the `motion-reel` skill, ready for **Motion Presentation Studio**.
+
+> **Scope vs `/new-motion-presentation`:**
+> - Use **`/animate-slides`** when the user *already has* pre-made presentation slide images (`01.png`, `02.png`, ...) and wants the model to stay visually faithful to those original slide layouts while generating kinetic transitions between them.
+> - Use **`/new-motion-presentation`** when creating a presentation **from scratch** (from a topic, outline, or product URL) with high creative freedom and Rest-Pose Idle Motion Loops (`XX_loop.mp4`).
 
 > **Creative autonomy:** Stay faithful to the visual look of the user's frames and the exact frame order, while keeping full creative freedom over transition choreography, pacing, and timing unless the user specifies constraints. Transitions are **audio-free (silent) by default** unless the user explicitly asks for sound.
 
@@ -18,12 +22,12 @@ Turn a sequence of user-provided keyframe images into faithful **2D-code-drawing
 ## 1. Wait For & Validate Frame Sequence (Mandatory Gate)
 
 1. **Wait for the frames path:**
-   If the user invoked `/create-new` without providing the path to their frames folder (or image files), ask for the frames path and stop. Do not guess a path or fabricate frames.
+   If the user invoked `/animate-slides` without providing the path to their frames folder (or image files), ask for the frames path and stop. Do not guess a path or fabricate frames.
 
 2. **Inspect and verify numeric ordering:**
    Once a path is given, run the inspection helper from the workspace root:
    ```bash
-   node ".agents/skills/create-new/scripts/inspect_frames.mjs" "<frames_path>"
+   node ".agents/skills/animate-slides/scripts/inspect_frames.mjs" "<frames_path>"
    ```
    Every frame filename must carry an unambiguous ordering number (e.g., `01_intro.png`, `frame_2.png`, `03-architecture.png`).
 
@@ -91,5 +95,25 @@ Export the final presentation assets into a clean output folder (e.g., `out/<pro
 
 - Slides (ordered PNGs): `01_frame.png`, `02_frame.png`, ..., `0N_frame.png` (matching exact start/end visual states)
 - Transition videos (H.264 `yuv420p`, 60 fps `.mp4`): `01-02_transition.mp4`, `02-03_transition.mp4`, ..., `0(N-1)-0N_transition.mp4`
+- Native `presentation.json` manifest (for Motion Presentation Studio's Surgical AI Edit Prompt Builder):
+  ```json
+  {
+    "skill": "animate-slides",
+    "title": "<Presentation Title>",
+    "aspectRatio": "16:9",
+    "projectRootPath": "<absolute path to reels/<project-slug>>",
+    "outputDirPath": "<absolute path to output folder>",
+    "slides": [
+      {
+        "index": 1,
+        "title": "Slide 1",
+        "frameFile": "01_frame.png",
+        "transitionVideoFile": "01-02_transition.mp4",
+        "slideCodeFile": "scenes/slide_01.js",
+        "transitionCodeFile": "t01-02/film.js"
+      }
+    ]
+  }
+  ```
 
 Verify every final `.mp4` with `ffprobe` (duration, 60 fps, `yuv420p`, no audio stream by default unless sound was explicitly requested) and report the output folder path and summary of all generated transitions to the user.

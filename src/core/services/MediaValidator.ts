@@ -178,8 +178,17 @@ export class MediaValidator {
   }
 
   static validateFile(file: File, expectedKind?: MediaKind): ValidationResult {
-    const ext = this.getExtension(file.name);
-    const mime = (file.type || '').toLowerCase();
+    return this.validateDescriptor(file.name, file.type || '', file.size, expectedKind);
+  }
+
+  static validateDescriptor(
+    fileName: string,
+    mimeType: string,
+    size: number,
+    expectedKind?: MediaKind
+  ): ValidationResult {
+    const ext = this.getExtension(fileName);
+    const mime = (mimeType || '').toLowerCase();
 
     const isKnownVideoExt = ALLOWED_VIDEO_EXTENSIONS.has(ext);
     const isKnownImageExt = ALLOWED_IMAGE_EXTENSIONS.has(ext);
@@ -211,17 +220,17 @@ export class MediaValidator {
         errorReason: t('core.kindMismatch', {
           expected: expectedLabel,
           actual: actualLabel,
-          name: file.name,
+          name: fileName,
         }),
       };
     }
 
-    if (file.size === 0) {
+    if (size === 0) {
       return {
         valid: false,
         kind: detectedKind,
         extension: ext,
-        errorReason: t('core.emptyFile', { name: file.name }),
+        errorReason: t('core.emptyFile', { name: fileName }),
       };
     }
 
@@ -248,6 +257,53 @@ export class MediaValidator {
       return this.ingestImageFile(file, validation.extension, signal);
     }
     return this.ingestVideoFile(file, validation.extension, signal);
+  }
+
+  /**
+   * Probes and ingests a media resource from an existing URL (`mpres://`, `blob:`, or HTTP)
+   * without reading the underlying file into JavaScript heap memory.
+   */
+  static async ingestFromUrl(
+    url: string,
+    kind: MediaKind,
+    meta: {
+      fileName: string;
+      mimeType: string;
+      size: number;
+      source?: MediaAsset['source'];
+    },
+    signal?: AbortSignal
+  ): Promise<MediaAsset> {
+    this.throwIfAborted(signal, t('core.importCancelled'));
+    const extension = this.getExtension(meta.fileName) || (kind === 'video' ? 'mp4' : 'png');
+
+    if (kind === 'image') {
+      return this.ingestImageFromUrl(
+        url,
+        {
+          name: meta.fileName,
+          mimeType: meta.mimeType || IMAGE_MIME_BY_EXT[extension] || 'image/png',
+          extension,
+          fileSize: meta.size,
+          source: meta.source,
+          revokeOnFail: false,
+        },
+        signal
+      );
+    }
+
+    return this.ingestVideoFromUrl(
+      url,
+      {
+        name: meta.fileName,
+        mimeType: meta.mimeType || VIDEO_MIME_BY_EXT[extension] || 'video/mp4',
+        extension,
+        fileSize: meta.size,
+        source: meta.source,
+        revokeOnFail: false,
+      },
+      signal
+    );
   }
 
   /**
@@ -529,14 +585,48 @@ export class MediaValidator {
     extension: string,
     signal?: AbortSignal
   ): Promise<MediaAsset> {
+    const objectUrl = URL.createObjectURL(file);
+    return this.ingestImageFromUrl(
+      objectUrl,
+      {
+        name: file.name,
+        mimeType: this.resolveMimeType(file, 'image', extension),
+        extension,
+        fileSize: file.size,
+        rawFile: file,
+        source: { kind: 'memory' },
+        revokeOnFail: true,
+      },
+      signal
+    );
+  }
+
+  private static ingestImageFromUrl(
+    objectUrl: string,
+    meta: {
+      name: string;
+      mimeType: string;
+      extension: string;
+      fileSize: number;
+      rawFile?: File | Blob;
+      source?: MediaAsset['source'];
+      revokeOnFail?: boolean;
+    },
+    signal?: AbortSignal
+  ): Promise<MediaAsset> {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) {
+        if (meta.revokeOnFail && objectUrl.startsWith('blob:')) {
+          URL.revokeObjectURL(objectUrl);
+        }
         reject(this.createAbortError(t('core.imageImportCancelled')));
         return;
       }
 
-      const objectUrl = URL.createObjectURL(file);
       const img = new Image();
+      if (/^(https?|mpres):\/\//i.test(objectUrl)) {
+        img.crossOrigin = 'anonymous';
+      }
       let settled = false;
       let timeoutId: number | null = null;
 
@@ -554,7 +644,9 @@ export class MediaValidator {
         if (settled) return;
         settled = true;
         cleanup();
-        URL.revokeObjectURL(objectUrl);
+        if (meta.revokeOnFail && objectUrl.startsWith('blob:')) {
+          URL.revokeObjectURL(objectUrl);
+        }
         reject(err);
       };
 
@@ -562,7 +654,7 @@ export class MediaValidator {
       signal?.addEventListener('abort', onAbort, { once: true });
 
       timeoutId = window.setTimeout(() => {
-        fail(new Error(t('core.imageReadTimeout', { name: file.name })));
+        fail(new Error(t('core.imageReadTimeout', { name: meta.name })));
       }, 10000);
 
       img.onload = () => {
@@ -570,8 +662,8 @@ export class MediaValidator {
         const naturalW = img.naturalWidth;
         const naturalH = img.naturalHeight;
 
-        if ((!naturalW || !naturalH) && extension !== 'svg') {
-          fail(new Error(t('core.imageCorrupted', { name: file.name })));
+        if ((!naturalW || !naturalH) && meta.extension !== 'svg') {
+          fail(new Error(t('core.imageCorrupted', { name: meta.name })));
           return;
         }
 
@@ -584,24 +676,25 @@ export class MediaValidator {
 
         resolve({
           id: generateId('img'),
-          name: file.name,
+          name: meta.name,
           kind: 'image',
-          mimeType: this.resolveMimeType(file, 'image', extension),
-          extension,
+          mimeType: meta.mimeType,
+          extension: meta.extension,
           objectUrl,
-          fileSize: file.size,
+          fileSize: meta.fileSize,
           width,
           height,
           durationSec: 0,
           thumbnailUrl: thumbUrl || objectUrl,
-          rawFile: file,
+          rawFile: meta.rawFile,
+          source: meta.source ?? (meta.rawFile ? { kind: 'memory' } : undefined),
           hasAudio: false,
           suggestedAspectRatio: this.inferAspectRatio(width, height),
         });
       };
 
       img.onerror = () => {
-        fail(new Error(t('core.imageReadFailed', { name: file.name })));
+        fail(new Error(t('core.imageReadFailed', { name: meta.name })));
       };
 
       img.src = objectUrl;
@@ -617,19 +710,54 @@ export class MediaValidator {
 
     const audioProbePromise = probeAudioInContainer(file, extension).catch(() => undefined);
     const objectUrl = URL.createObjectURL(file);
+    return this.ingestVideoFromUrl(
+      objectUrl,
+      {
+        name: file.name,
+        mimeType: this.resolveMimeType(file, 'video', extension),
+        extension,
+        fileSize: file.size,
+        rawFile: file,
+        source: { kind: 'memory' },
+        containerAudioPromise: audioProbePromise,
+        revokeOnFail: true,
+      },
+      signal
+    );
+  }
+
+  private static async ingestVideoFromUrl(
+    objectUrl: string,
+    meta: {
+      name: string;
+      mimeType: string;
+      extension: string;
+      fileSize: number;
+      rawFile?: File | Blob;
+      source?: MediaAsset['source'];
+      containerAudioPromise?: Promise<boolean | undefined>;
+      revokeOnFail?: boolean;
+    },
+    signal?: AbortSignal
+  ): Promise<MediaAsset> {
+    this.throwIfAborted(signal, t('core.videoAnalyzeCancelled'));
+
     const video = document.createElement('video');
     video.preload = 'auto';
     video.muted = true;
     video.playsInline = true;
+    if (/^(https?|mpres):\/\//i.test(objectUrl)) {
+      video.crossOrigin = 'anonymous';
+    }
 
     try {
-      await this.waitForVideoLoadedData(video, objectUrl, file.name, { signal });
+      await this.waitForVideoLoadedData(video, objectUrl, meta.name, { signal });
 
       const width = video.videoWidth;
       const height = video.videoHeight;
       if (!width || !height) {
         throw new Error(
-          t('core.videoNoVisualTrack', { name: file.name })
+          t('core.videoNoVisualTrack', { name: meta.name })
         );
       }
 
@@ -637,7 +765,7 @@ export class MediaValidator {
       const durationSec = await this.resolveFiniteVideoDuration(video, { signal });
 
       if (!Number.isFinite(durationSec) || durationSec <= 0) {
-        throw new Error(t('core.videoDurationUnknown', { name: file.name }));
+        throw new Error(t('core.videoDurationUnknown', { name: meta.name }));
       }
 
       let firstFrameUrl = '';
@@ -687,31 +815,36 @@ export class MediaValidator {
         }
       }
 
-      const containerHasAudio = await audioProbePromise;
+      const containerHasAudio = meta.containerAudioPromise
+        ? await meta.containerAudioPromise
+        : undefined;
       const runtimeHasAudio = detectRuntimeAudioFlag(video);
       const hasAudio =
         containerHasAudio !== undefined ? containerHasAudio : runtimeHasAudio;
 
       return {
         id: generateId('vid'),
-        name: file.name,
+        name: meta.name,
         kind: 'video',
-        mimeType: this.resolveMimeType(file, 'video', extension),
-        extension,
+        mimeType: meta.mimeType,
+        extension: meta.extension,
         objectUrl,
-        fileSize: file.size,
+        fileSize: meta.fileSize,
         width,
         height,
         durationSec,
         thumbnailUrl: firstFrameUrl || lastFrameUrl,
         lastFrameUrl: lastFrameUrl || firstFrameUrl,
-        rawFile: file,
+        rawFile: meta.rawFile,
+        source: meta.source ?? (meta.rawFile ? { kind: 'memory' } : undefined),
         hasAudio,
         suggestedAspectRatio: this.inferAspectRatio(width, height),
       };
     } catch (err) {
-      URL.revokeObjectURL(objectUrl);
-      throw err instanceof Error ? err : new Error(t('core.videoAnalyzeError', { name: file.name }));
+      if (meta.revokeOnFail && objectUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(objectUrl);
+      }
+      throw err instanceof Error ? err : new Error(t('core.videoAnalyzeError', { name: meta.name }));
     } finally {
       this.cleanupVideoElement(video);
     }

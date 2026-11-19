@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="260" viewBox="0 0 960 260" role="img" aria-label="Motion Presentation Studio — Hero Banner">
+  <defs>
+    <radialGradient id="coralGlow" cx="18%" cy="46%" r="36%">
+      <stop offset="0%" stop-color="#FF3D2E" stop-opacity="0.22"/>
+      <stop offset="60%" stop-color="#FF3D2E" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#0A0A0A" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="topGlow" cx="82%" cy="15%" r="45%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#0A0A0A" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="surfaceCard" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#141417"/>
+      <stop offset="100%" stop-color="#0A0A0C"/>
+    </linearGradient>
+    <pattern id="subtleGrid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="rgba(255,255,255,0.03)" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <!-- Base Canvas: Framer Noir -->
+  <rect width="960" height="260" rx="20" fill="url(#surfaceCard)"/>
+  <rect width="960" height="260" rx="20" fill="url(#subtleGrid)"/>
+  <rect width="960" height="260" rx="20" fill="url(#coralGlow)"/>
+  <rect width="960" height="260" rx="20" fill="url(#topGlow)"/>
+  <rect x="1" y="1" width="958" height="258" rx="19" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="1.5"/>
+
+  <!-- Top Highlight Line -->
+  <line x1="24" y1="1.5" x2="936" y2="1.5" stroke="rgba(255,255,255,0.16)" stroke-width="1"/>
+
+  <!-- Concept 10: Kinetic M Brand Mark -->
+  <g transform="translate(56 54) scale(1.68)">
+    <rect x="6" y="22" width="30" height="5" rx="2.5" fill="#FF3D2E"/>
+    <rect x="14" y="37" width="22" height="5" rx="2.5" fill="#FF3D2E" fill-opacity="0.7"/>
+    <rect x="0" y="52" width="36" height="5" rx="2.5" fill="#FF3D2E" fill-opacity="0.45"/>
+    <g transform="translate(22 2) skewX(-14)">
+      <path d="M44 66V14L68 34L92 14V66" fill="none" stroke="#FFFFFF" stroke-width="12" stroke-linejoin="miter" stroke-miterlimit="10"/>
+      <path d="M61 46V64L81 55Z" fill="#FF3D2E" stroke="#FF3D2E" stroke-width="3" stroke-linejoin="round"/>
+    </g>
+  </g>
+
+  <!-- Wordmark -->
+  <g transform="translate(278 118)" font-family="'Archivo', 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif" font-style="italic">
+    <text x="0" y="0" font-size="66" font-weight="800" letter-spacing="-2" fill="#FAFAFA">MOTION</text>
+    <text x="3" y="32" font-size="17" font-weight="700" letter-spacing="3.2" fill="#FF3D2E">PRESENTATION STUDIO</text>
+  </g>
+
+  <!-- Right Audience Tagline & Version Pill -->
+  <g transform="translate(912 62)" font-family="'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif">
+    <rect x="-166" y="-22" width="166" height="28" rx="8" fill="#18181B" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+    <circle cx="-150" cy="-8" r="3.5" fill="#FF3D2E"/>
+    <text x="-139" y="-3.5" font-size="11.5" font-weight="600" letter-spacing="0.6" fill="#E4E4E7">DESKTOP APP · v1.4.3</text>
+
+    <text x="0" y="34" text-anchor="end" font-size="15.5" font-weight="600" fill="#FAFAFA">Smooth motion presentations.</text>
+    <text x="0" y="57" text-anchor="end" font-size="14" font-weight="400" fill="#A1A1AA">Built for live stages &amp; AI workflows.</text>
+  </g>
+
+  <!-- Bottom Feature Pills (Crisp 8px Geometry) -->
+  <g transform="translate(56 202)" font-family="'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12" font-weight="500">
+    <!-- Pill 1 -->
+    <rect x="0" y="0" width="170" height="30" rx="8" fill="#161619" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
+    <circle cx="16" cy="15" r="3.5" fill="#FF3D2E"/>
+    <text x="28" y="19" fill="#E4E4E7">Zero-Flicker Playback</text>
+
+    <!-- Pill 2 -->
+    <rect x="182" y="0" width="164" height="30" rx="8" fill="#161619" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
+    <path d="M198 10L199.6 13.4L203 15L199.6 16.6L198 20L196.4 16.6L193 15L196.4 13.4Z" fill="#FAFAFA"/>
+    <text x="211" y="19" fill="#E4E4E7">AI Skills Compatible</text>
+
+    <!-- Pill 3 -->
+    <rect x="358" y="0" width="176" height="30" rx="8" fill="#161619" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
+    <rect x="372" y="10" width="10" height="10" rx="2.5" fill="#03B9CE"/>
+    <text x="390" y="19" fill="#E4E4E7">6 Studio Skins · EN / AR</text>
+
+    <!-- Pill 4 -->
+    <rect x="546" y="0" width="184" height="30" rx="8" fill="#161619" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
+    <rect x="560" y="10" width="10" height="10" rx="2.5" fill="none" stroke="#FAFAFA" stroke-width="1.5"/>
+    <text x="578" y="19" fill="#E4E4E7">Portable .mpres Projects</text>
+  </g>
+</svg>

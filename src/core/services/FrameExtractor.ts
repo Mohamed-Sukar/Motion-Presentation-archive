@@ -66,7 +66,7 @@ export class FrameExtractor {
     video.preload = 'auto';
     video.muted = true;
     video.playsInline = true;
-    if (/^https?:\/\//i.test(videoAsset.objectUrl)) {
+    if (/^(https?|mpres):\/\//i.test(videoAsset.objectUrl)) {
       video.crossOrigin = 'anonymous';
     }
 
@@ -193,23 +193,6 @@ export class FrameExtractor {
         MediaValidator.revokeAssetUrls(asset);
       }
       throw err;
-    } finally {
-      session.dispose();
-    }
-  }
-
-  /**
-   * Captures a fast JPEG preview data URL at `timeSec` without creating a PNG File/Blob.
-   */
-  static async extractFrameThumbnail(
-    videoAsset: MediaAsset,
-    timeSec: number,
-    maxDimension = 320,
-    signal?: AbortSignal
-  ): Promise<string> {
-    const session = await this.createSession(videoAsset, signal);
-    try {
-      return await session.seekAndCaptureThumb(timeSec, maxDimension, signal);
     } finally {
       session.dispose();
     }

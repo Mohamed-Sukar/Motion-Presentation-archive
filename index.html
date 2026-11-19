@@ -3,13 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <title>Motion Presentation Studio</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
-      rel="stylesheet"
-    />
     <script>
       (function () {
         try {
@@ -27,6 +22,35 @@
     </script>
   </head>
   <body>
+    <div
+      id="app-splash"
+      dir="ltr"
+      aria-hidden="true"
+      style="position:fixed;inset:0;z-index:99999;background:#0A0A0A;display:flex;flex-direction:column;justify-content:space-between;padding:28px 34px;font-family:Inter,system-ui,-apple-system,sans-serif;transition:opacity 220ms ease-out;"
+    >
+      <div style="height:1px"></div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:14px;">
+        <svg width="150" height="100" viewBox="0 0 120 80" aria-hidden="true">
+          <rect x="6" y="22" width="30" height="5" rx="2.5" fill="#FF3D2E" />
+          <rect x="14" y="37" width="22" height="5" rx="2.5" fill="#FF3D2E" fill-opacity="0.7" />
+          <rect x="0" y="52" width="36" height="5" rx="2.5" fill="#FF3D2E" fill-opacity="0.45" />
+          <g transform="translate(22 2) skewX(-14)">
+            <path d="M44 66V14L68 34L92 14V66" fill="none" stroke="#FFFFFF" stroke-width="12" stroke-linejoin="miter" stroke-miterlimit="10" />
+            <path d="M61 46V64L81 55Z" fill="#FF3D2E" stroke="#FF3D2E" stroke-width="3" stroke-linejoin="round" />
+          </g>
+        </svg>
+        <div style="display:flex;flex-direction:column;align-items:center;gap:6px;font-style:italic;margin-top:2px;">
+          <div style="font-size:32px;line-height:1;font-weight:800;letter-spacing:-0.03em;text-transform:uppercase;color:#FFFFFF;">Motion</div>
+          <div style="font-size:11px;line-height:1;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#FF3D2E;">Presentation Studio</div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:20px;">
+        <div style="width:180px;height:4px;background:#222222;border-radius:999px;overflow:hidden;">
+          <div style="width:68%;height:100%;background:#FF3D2E;border-radius:999px;"></div>
+        </div>
+        <div id="app-splash-version" style="font-size:11px;color:#737373;font-variant-numeric:tabular-nums;"></div>
+      </div>
+    </div>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -1,0 +1,119 @@
+{
+  "version": "1.2.0",
+  "projectId": "fixture_v1_1_1",
+  "exportedAt": "2026-11-15T00:04:54.183Z",
+  "title": "عرض تقديمي تجريبي",
+  "settings": {
+    "aspectRatio": "16:9",
+    "fitMode": "contain",
+    "stageBackground": "#05070B",
+    "globalPlaybackSpeed": 1,
+    "interruptBehavior": "skip",
+    "backwardBehavior": "reverse-step",
+    "defaultFallbackStyle": "crossfade",
+    "defaultFallbackDurationMs": 650,
+    "masterMuted": false,
+    "masterVolume": 0.9,
+    "loopPresentation": false,
+    "showPresenterHud": "minimal",
+    "autoHideCursor": true,
+    "preloadStrategy": "adjacent"
+  },
+  "aiSourceMeta": {
+    "skillName": "new-motion-presentation",
+    "creativeDirection": "Clean Glass Motion"
+  },
+  "slides": [
+    {
+      "id": "fix_slide_1",
+      "index": 1,
+      "title": "المقدمة الرئيسية",
+      "notes": "ملاحظات الشريحة الأولى",
+      "holdDurationSec": 5,
+      "imageFileName": "01_intro.png",
+      "imageMimeType": "image/png",
+      "imageWidth": 1920,
+      "imageHeight": 1080,
+      "imageResolution": "1920x1080",
+      "imageThumbnailUrl": "data:image/png;base64,AA==",
+      "imageDataUrl": "data:image/png;base64,AA==",
+      "idleLoopVideoId": "fix_loop_1",
+      "idleLoopFileName": "01_loop.mp4",
+      "idleLoopDurationSec": 4,
+      "sourceMeta": {
+        "slideCodeFile": "scenes/slide_01.js",
+        "idleLoopCodeFile": "loops/loop_01.js",
+        "exitPointsSec": [
+          0,
+          2
+        ]
+      },
+      "transitionToNext": {
+        "hasCustomVideo": true,
+        "videoId": "fix_tr_1",
+        "videoFileName": "01_to_02.mp4",
+        "videoDurationSec": 2.4,
+        "startTimeSec": 0.2,
+        "endTimeSec": 2.1,
+        "videoThumbnailUrl": "data:image/png;base64,AA==",
+        "fallbackStyle": "zoom-morph",
+        "fallbackDurationMs": 500,
+        "playbackSpeed": 1.25,
+        "muted": true,
+        "easing": "ease-in-out"
+      }
+    },
+    {
+      "id": "fix_slide_2",
+      "index": 2,
+      "title": "تدفق النظام",
+      "notes": "Second slide notes",
+      "holdDurationSec": null,
+      "imageFileName": "02_flow.png",
+      "imageMimeType": "image/png",
+      "imageWidth": 1920,
+      "imageHeight": 1080,
+      "imageResolution": "1920x1080",
+      "imageThumbnailUrl": "data:image/png;base64,AA==",
+      "imageDataUrl": "data:image/png;base64,AA==",
+      "idleLoopFileName": null,
+      "idleLoopDurationSec": 0,
+      "transitionToNext": {
+        "hasCustomVideo": false,
+        "videoFileName": null,
+        "videoDurationSec": 0,
+        "fallbackStyle": "slide-push",
+        "fallbackDurationMs": 700,
+        "playbackSpeed": 1,
+        "muted": false,
+        "easing": "ease-out"
+      }
+    },
+    {
+      "id": "fix_slide_3",
+      "index": 3,
+      "title": "الخاتمة",
+      "notes": "Closing notes",
+      "holdDurationSec": 3.5,
+      "imageFileName": "03_end.png",
+      "imageMimeType": "image/png",
+      "imageWidth": 1920,
+      "imageHeight": 1080,
+      "imageResolution": "1920x1080",
+      "imageThumbnailUrl": "data:image/png;base64,AA==",
+      "imageDataUrl": "data:image/png;base64,AA==",
+      "idleLoopFileName": null,
+      "idleLoopDurationSec": 0,
+      "transitionToNext": {
+        "hasCustomVideo": false,
+        "videoFileName": null,
+        "videoDurationSec": 0,
+        "fallbackStyle": "crossfade",
+        "fallbackDurationMs": 650,
+        "playbackSpeed": 1,
+        "muted": false,
+        "easing": "linear"
+      }
+    }
+  ]
+}

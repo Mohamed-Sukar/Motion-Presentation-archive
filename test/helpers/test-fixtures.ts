@@ -4,7 +4,6 @@
 
 import { MediaAsset, SlideNode, PresentationProject, PresentationSettings } from '../../src/core/domain/types';
 import {
-  createDefaultSettings,
   createDefaultTransition,
   createSlideNode,
   createEmptyProject,
